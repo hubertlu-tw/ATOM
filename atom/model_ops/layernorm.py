@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from aiter import rmsnorm2d_fwd, rmsnorm2d_fwd_with_add
 
 
 class RMSNorm(nn.Module):
@@ -46,6 +47,9 @@ class RMSNorm(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
-            return self.rms_forward(x)
+            return rmsnorm2d_fwd(x, self.weight, self.eps)
         else:
-            return self.add_rms_forward(x, residual)
+            out = torch.empty_like(out)
+            residual_out = torch.empty_like(residual)
+            rmsnorm2d_fwd_with_add(out, x, residual, residual_out, self.weight, self.eps)
+            return out, residual_out
