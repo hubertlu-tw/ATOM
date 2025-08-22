@@ -39,8 +39,15 @@ class Attention(nn.Module):
         if k_cache.numel() and v_cache.numel() and context.slot_mapping is not None:
             if self.kv_cache_dtype == "fp8":
                 aiter.reshape_and_cache_with_pertoken_quant(
-                k, v, k_cache, v_cache, self.k_scale, self.v_scale, context.slot_mapping, asm_layout=True
-            )
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    self.k_scale,
+                    self.v_scale,
+                    context.slot_mapping,
+                    asm_layout=True,
+                )
             else:
                 aiter.reshape_and_cache(
                     k,
@@ -53,7 +60,6 @@ class Attention(nn.Module):
                     v_scale=None,
                     asm_layout=True,
                 )
-
 
         if context.is_prefill:
             # if context.block_tables is not None:  # prefix cache
@@ -72,10 +78,8 @@ class Attention(nn.Module):
                 causal=True,
             )
         else:  # decode
-
-
             o = aiter.pa_fwd_asm(
-                q.contiguous(),
+                q,
                 k_cache,
                 v_cache,
                 context.block_tables,
@@ -84,7 +88,7 @@ class Attention(nn.Module):
                 K_QScale=self.k_scale,
                 V_QScale=self.v_scale,
                 out_=None,
-                high_precision=0
+                high_precision=0,
             )
 
             # o = PagedAttention.forward_decode(

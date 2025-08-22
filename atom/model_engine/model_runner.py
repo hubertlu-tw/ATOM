@@ -35,7 +35,7 @@ class ModelRunner:
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config, config.kv_cache_dtype)
-        # self.model = torch.compile(self.model, fullgraph=True)
+        # self.model = torch.compile(self.model, fullgraph=True, backend="eager")
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()

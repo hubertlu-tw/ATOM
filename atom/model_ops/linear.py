@@ -108,11 +108,11 @@ class LinearBase(nn.Module):
     def forward(
         self, x: torch.Tensor, x_scale: Optional[torch.Tensor] = None, otype=dtypes.bf16
     ) -> torch.Tensor:
-        if self.quant_type == QuantType.No:
+        if self.quant_type.value == QuantType.No.value:
             y = tgemm.mm(x, self.weight, self.bias)
         else:
             assert x_scale is not None
-            if self.quant_type == QuantType.per_Tensor:
+            if self.quant_type.value == QuantType.per_Tensor.value:
                 y = tgemm.mm(
                     x,
                     self.weight,
@@ -121,15 +121,15 @@ class LinearBase(nn.Module):
                     scale_a=x_scale,
                     scale_b=self.weight_scale,
                 )
-            elif self.quant_type == QuantType.per_Token:
+            elif self.quant_type.value == QuantType.per_Token.value:
                 y = gemm_a8w8_bpreshuffle(
                     x, self.weight, x_scale, self.weight_scale, self.bias, dtype=otype
                 )
-            elif self.quant_type == QuantType.per_128x128:
+            elif self.quant_type.value == QuantType.per_128x128.value:
                 y = gemm_a8w8_blockscale(
                     x, self.weight, x_scale, self.weight_scale, self.bias, dtype=otype
                 )
-            elif self.quant_type == QuantType.per_1x32:
+            elif self.quant_type.value == QuantType.per_1x32.value:
                 y = gemm_a4w4(
                     x, self.weight, x_scale, self.weight_scale, self.bias, dtype=otype
                 )
