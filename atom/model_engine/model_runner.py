@@ -34,7 +34,8 @@ class ModelRunner:
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config, config.kv_cache_dtype)
-        # self.model = torch.compile(self.model, fullgraph=True, backend="eager")
+        if self.config.compilation_config.level == 3:
+            self.model = torch.compile(self.model, fullgraph=True, backend="eager")
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()
@@ -369,7 +370,9 @@ class ModelRunner:
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
 
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        # self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.graph_bs = self.config.compilation_config.cudagraph_capture_sizes
+
         self.graphs = {}
         self.graph_pool = None
 
