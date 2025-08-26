@@ -23,10 +23,14 @@ parser.add_argument(
     "--model", type=str, default="Qwen/Qwen3-0.6B", help="Model name or path."
 )
 
-parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=2)
+parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
 
 parser.add_argument(
     "--enforce-eager", action="store_true", help="Enforce eager mode execution."
+)
+
+parser.add_argument(
+    "--enable_prefix_caching", action="store_true", help="Enable prefix caching."
 )
 
 parser.add_argument("--port", type=int, default=8006, help="API server port")

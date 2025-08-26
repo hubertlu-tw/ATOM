@@ -53,6 +53,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         num_embeddings: int,
         embedding_dim: int,
         bias: bool = False,
+        **kwargs,
     ):
         super().__init__(num_embeddings, embedding_dim)
         if bias:

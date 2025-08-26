@@ -18,6 +18,7 @@ class Attention(nn.Module):
         scale,
         num_kv_heads,
         kv_cache_dtype="bf16",
+        **kwargs,
     ):
         super().__init__()
         self.num_heads = num_heads

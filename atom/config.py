@@ -1,8 +1,13 @@
 import os
+import torch
+import re
 from dataclasses import dataclass
 from transformers import AutoConfig
 from typing import Optional
 from dataclasses import field
+from aiter import QuantType
+from transformers import PretrainedConfig
+from aiter.utility.dtypes import d_dtypes
 
 
 @dataclass
@@ -35,6 +40,71 @@ class CompilationConfig:
             self.cuda_graph_sizes = [128]
 
 
+class QuantizationConfig(dict):
+    def __init__(
+        self, quant_type=QuantType.No, quant_dtype=torch.bfloat16, quant_name=""
+    ):
+        super().__init__()
+        self["quant_type"] = quant_type if quant_type is not None else QuantType.No
+        self["quant_dtype"] = quant_dtype if quant_dtype is not None else torch.bfloat16
+        self["quant_name"] = quant_name
+
+    def get_name(self):
+        return self["quant_name"]
+
+
+def get_quant_config(config: PretrainedConfig) -> QuantizationConfig:
+    torch_dtype = getattr(config, "torch_dtype", "bf16")
+    orig_quant_config = getattr(config, "quantization_config", None)
+    if orig_quant_config is None:
+        return QuantizationConfig(
+            quant_type=QuantType.No,
+            quant_dtype=torch_dtype,
+        )
+
+    quant_method = orig_quant_config.get("quant_method", None)
+    RE_QUANT_BLOCKSIZE = r"\'(?:group_size|weight_block_size)\'\:\s*(?:\[\n*)\s*(\d+),"
+    orig_quant_config_str = str(orig_quant_config)
+    if quant_method == "compressed-tensors" or 'channel",' in orig_quant_config_str:
+        quant_type = QuantType.per_Token
+    elif group_size := re.search(RE_QUANT_BLOCKSIZE, orig_quant_config_str):
+        group_size = int(group_size.group(1))
+        assert group_size in (32, 128), f"Unsupported group size {group_size}"
+        if group_size == 128:
+            quant_type = QuantType.per_1x128
+        elif group_size == 32:
+            quant_type = QuantType.per_1x32
+    else:
+        quant_type = QuantType.per_Tensor
+
+    RE_QUANT_DTYPE = r"\'(?:d?type|weight_dtype|quant_method)\'\:\s*\'(\w+)\'"
+    quant_dtype = None
+    m = re.search(RE_QUANT_DTYPE, orig_quant_config_str)
+    if m and m.group(1).lower() in ["fp8", "fp4", "int8", "int4"]:
+        dtype = m.group(1).lower()
+        if dtype.endswith("4"):
+            dtype += "x2"
+        quant_dtype = d_dtypes[dtype]
+    else:
+        bit_match = re.search(r"\'(?:num_)?bits\'\:\s*(\d+)", orig_quant_config_str)
+        if bit_match:
+            bit = int(bit_match.group(1))
+            dtype_match = re.search(RE_QUANT_DTYPE, orig_quant_config_str)
+            if dtype_match:
+                dtype = dtype_match.group(1).lower()
+                dtype_prefix = "i" if dtype.startswith("int") else "fp"
+            else:
+                dtype_prefix = "i"
+            quant_dtype_str = (
+                f"{dtype_prefix}{bit}" if bit != 4 else f"{dtype_prefix}{bit}x2"
+            )
+            quant_dtype = d_dtypes.get(quant_dtype_str, None)
+    assert (
+        quant_dtype is not None
+    ), f"Cannot parse quant dtype from {orig_quant_config_str}"
+    return QuantizationConfig(quant_type, quant_dtype)
+
+
 @dataclass
 class Config:
     model: str
@@ -49,10 +119,10 @@ class Config:
     kvcache_block_size: int = 16
     num_kvcache_blocks: int = -1
     kv_cache_dtype: str = "bf16"
+    enable_prefix_caching: bool = False
     port: int = 8006
     torch_profiler_dir: str | None = os.getenv("ATOM_TORCH_PROFILER_DIR", None)
-    compilation_config: CompilationConfig = field(
-        default_factory=CompilationConfig)
+    compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
 
     def __post_init__(self):
         # assert os.path.isdir(self.model)
