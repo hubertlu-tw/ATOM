@@ -2,9 +2,10 @@ import pickle
 import os
 import torch
 import torch.distributed as dist
+import tqdm
 from aiter import dtypes
 from aiter import init_dist_env, destroy_dist_env
-from aiter.dist.parallel_state import graph_capture
+from aiter.dist.parallel_state import graph_capture, get_tensor_model_parallel_rank
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 from atom.config import Config
@@ -391,31 +392,37 @@ class ModelRunner:
                     i for i in range(64, cuda_graph_sizes[0] + 1, 64)
                 ]
             elif len(cuda_graph_sizes) > 1:
-                self.graph_bs = sorted(cuda_graph_sizes)
-
+                self.graph_bs = sorted(cuda_graph_sizes, reverse=True)
 
         self.graphs = {}
         self.graph_pool = None
 
-        for bs in reversed(self.graph_bs):
-            graph = torch.cuda.CUDAGraph()
-            set_context(
-                False,
-                slot_mapping=slot_mapping[:bs],
-                context_lens=context_lens[:bs],
-                block_tables=block_tables[:bs],
+        with graph_capture() as gc:
+            capture_range = (
+                tqdm.tqdm(self.graph_bs)
+                if get_tensor_model_parallel_rank() == 0
+                else self.graph_bs
             )
+            for bs in capture_range:
+                if get_tensor_model_parallel_rank() == 0:
+                    capture_range.set_description(f"Capturing {bs=}")
+                graph = torch.cuda.CUDAGraph()
+                set_context(
+                    False,
+                    slot_mapping=slot_mapping[:bs],
+                    context_lens=context_lens[:bs],
+                    block_tables=block_tables[:bs],
+                )
 
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
 
-            with graph_capture() as gc:
                 with torch.cuda.graph(graph, self.graph_pool, stream=gc.stream):
                     outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # capture
-            if self.graph_pool is None:
-                self.graph_pool = graph.pool()
-            self.graphs[bs] = graph
-            torch.cuda.synchronize()
-            reset_context()
+                if self.graph_pool is None:
+                    self.graph_pool = graph.pool()
+                self.graphs[bs] = graph
+                torch.cuda.synchronize()
+                reset_context()
 
         self.graph_vars = dict(
             input_ids=input_ids,
