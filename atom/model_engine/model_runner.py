@@ -13,12 +13,14 @@ from atom.model_engine.sequence import Sequence
 from atom.model_ops.sampler import Sampler
 from atom.models.qwen3 import Qwen3ForCausalLM
 from atom.models.llama import LlamaForCausalLM
+# from atom.models.mixtral import MixtralForCausalLM
 from atom.utils.context import set_context, get_context, reset_context
 from atom.model_loader.loader import load_model
 
 suppot_model_arch_dict = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
+    # "MixtralForCausalLM": MixtralForCausalLM,
 }
 
 
@@ -41,9 +43,7 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        self.model = suppot_model_arch_dict[hf_config.architectures[0]](
-            hf_config, config.kv_cache_dtype
-        )
+        self.model = suppot_model_arch_dict[hf_config.architectures[0]](config)
         if self.config.compilation_config.level == 3:
             self.model = torch.compile(self.model, fullgraph=True, backend="eager")
         load_model(self.model, config.model)

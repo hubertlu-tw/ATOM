@@ -25,17 +25,29 @@ def load_model(model: nn.Module, model_name_or_path: str):
         print(f"Loading weights from {file}")
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
+                if  weight_name.endswith(
+                    "kv_scale"
+                ):
+                    continue
+                weight_tensor = f.get_tensor(weight_name)
+                if "weight_scale_inv" in weight_name:
+                    weight_name = weight_name.replace(
+                        "weight_scale_inv", "weight_scale"
+                    )
                 for k in packed_modules_mapping:
                     if k in weight_name:
                         v, shard_id = packed_modules_mapping[k]
                         param_name = weight_name.replace(k, v)
                         param = model.get_parameter(param_name)
                         weight_loader = getattr(param, "weight_loader")
-                        weight_loader(param, f.get_tensor(weight_name), shard_id)
+                        weight_loader(param, weight_tensor, shard_id)
                         break
                 else:
                     param = model.get_parameter(weight_name)
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    weight_loader(param, f.get_tensor(weight_name))
+                    weight_loader(param, weight_tensor)
+    for _, module in model.named_modules():
+        if hasattr(module, "process_weights_after_loading"):
+            module.process_weights_after_loading()

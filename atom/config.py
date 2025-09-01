@@ -42,12 +42,13 @@ class CompilationConfig:
 
 class QuantizationConfig(dict):
     def __init__(
-        self, quant_type=QuantType.No, quant_dtype=torch.bfloat16, quant_name=""
+        self, quant_type=QuantType.No, quant_dtype=torch.bfloat16, is_dynamic=True, quant_name=""
     ):
         super().__init__()
         self["quant_type"] = quant_type if quant_type is not None else QuantType.No
         self["quant_dtype"] = quant_dtype if quant_dtype is not None else torch.bfloat16
         self["quant_name"] = quant_name
+        self["is_dynamic"] = is_dynamic
 
     def get_name(self):
         return self["quant_name"]
@@ -65,7 +66,7 @@ def get_quant_config(config: PretrainedConfig) -> QuantizationConfig:
     quant_method = orig_quant_config.get("quant_method", None)
     RE_QUANT_BLOCKSIZE = r"\'(?:group_size|weight_block_size)\'\:\s*(?:\[\n*)\s*(\d+),"
     orig_quant_config_str = str(orig_quant_config)
-    if quant_method == "compressed-tensors" or 'channel",' in orig_quant_config_str:
+    if quant_method == "compressed-tensors" or "channel'," in orig_quant_config_str:
         quant_type = QuantType.per_Token
     elif group_size := re.search(RE_QUANT_BLOCKSIZE, orig_quant_config_str):
         group_size = int(group_size.group(1))
@@ -80,8 +81,8 @@ def get_quant_config(config: PretrainedConfig) -> QuantizationConfig:
     RE_QUANT_DTYPE = r"\'(?:d?type|weight_dtype|quant_method)\'\:\s*\'(\w+)\'"
     quant_dtype = None
     m = re.search(RE_QUANT_DTYPE, orig_quant_config_str)
-    if m and m.group(1).lower() in ["fp8", "fp4", "int8", "int4"]:
-        dtype = m.group(1).lower()
+    if m and m.group(1).lower() in ["fp8", "fp4", "int8", "int4", "fp8_e4m3"]:
+        dtype = m.group(1).lower().split("_")[0]
         if dtype.endswith("4"):
             dtype += "x2"
         quant_dtype = d_dtypes[dtype]
@@ -102,7 +103,13 @@ def get_quant_config(config: PretrainedConfig) -> QuantizationConfig:
     assert (
         quant_dtype is not None
     ), f"Cannot parse quant dtype from {orig_quant_config_str}"
-    return QuantizationConfig(quant_type, quant_dtype)
+
+    RE_STATIC_QUANT = r"\'(?:activation_scheme)\'\:\s*\'(static)\'"
+    if re.search(RE_STATIC_QUANT, orig_quant_config_str):
+        is_dynamic = False
+    else:
+        is_dynamic = True
+    return QuantizationConfig(quant_type, quant_dtype, is_dynamic)
 
 
 @dataclass
@@ -123,12 +130,14 @@ class Config:
     port: int = 8006
     torch_profiler_dir: str | None = os.getenv("ATOM_TORCH_PROFILER_DIR", None)
     compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
+    quant_config: QuantizationConfig = field(default_factory=lambda: QuantizationConfig())
 
     def __post_init__(self):
         # assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 16 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model)
+        self.quant_config = get_quant_config(self.hf_config)
         self.max_model_len = min(
             self.max_model_len, self.hf_config.max_position_embeddings
         )

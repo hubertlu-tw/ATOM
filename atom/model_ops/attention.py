@@ -6,7 +6,7 @@ import triton.language as tl
 import aiter
 from aiter.paged_attn import PagedAttention
 from atom.utils.context import get_context
-from flash_attn import flash_attn_with_kvcache
+# from flash_attn import flash_attn_with_kvcache
 
 
 class Attention(nn.Module):
