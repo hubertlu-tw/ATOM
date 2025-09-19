@@ -295,3 +295,142 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=linger)
+from packaging import version
+from packaging.version import Version
+import importlib
+import torch
+import copy
+import dataclasses
+from contextlib import contextmanager
+from typing import Union, Any
+from atom.config import get_capture_status, CompilationConfig, Config
+from atom.config import CompilationLevel
+import time
+
+context_manager = None
+torch_compile_start_time: float = 0.0
+
+
+def is_torch_equal_or_newer(target: str) -> bool:
+    """Check if the installed torch version is >= the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        return _is_torch_equal_or_newer(str(torch.__version__), target)
+    except Exception:
+        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
+        return Version(importlib.metadata.version('torch')) >= Version(target)
+
+
+# Helper function used in testing.
+def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
+    torch_version = version.parse(torch_version)
+    return torch_version >= version.parse(target)
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C.weak_ref_tensor(tensor)
+    else:
+        return tensor
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")
+
+
+@dataclasses.dataclass
+class CompilationCounter:
+    num_models_seen: int = 0
+    num_graphs_seen: int = 0
+    # including the splitting ops
+    num_piecewise_graphs_seen: int = 0
+    # not including the splitting ops
+    num_piecewise_capturable_graphs_seen: int = 0
+    num_backend_compilations: int = 0
+    # Number of gpu_model_runner attempts to trigger CUDAGraphs capture
+    num_gpu_runner_capture_triggers: int = 0
+    # Number of CUDAGraphs captured
+    num_cudagraph_captured: int = 0
+    # InductorAdapter.compile calls
+    num_inductor_compiles: int = 0
+    # EagerAdapter.compile calls
+    num_eager_compiles: int = 0
+    # The number of time vLLM's compiler cache entry was updated
+    num_cache_entries_updated: int = 0
+    # The number of standalone_compile compiled artifacts saved
+    num_compiled_artifacts_saved: int = 0
+    # Number of times a model was loaded with CompilationLevel.DYNAMO_AS_IS
+    dynamo_as_is_count: int = 0
+
+    def clone(self) -> "CompilationCounter":
+        return copy.deepcopy(self)
+
+    @contextmanager
+    def expect(self, **kwargs):
+        old = self.clone()
+        yield
+        for k, v in kwargs.items():
+            assert getattr(self, k) - getattr(old, k) == v, (
+                f"{k} not as expected, before it is {getattr(old, k)}"
+                f", after it is {getattr(self, k)}, "
+                f"expected diff is {v}")
+
+
+compilation_counter = CompilationCounter()
+
+
+
+def resolve_obj_by_qualname(qualname: str) -> Any:
+    """
+    Resolve an object by its fully-qualified class name.
+    """
+    module_name, obj_name = qualname.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, obj_name)
+
+
+def start_monitoring_torch_compile(vllm_config: Config):
+    global torch_compile_start_time
+    torch_compile_start_time = time.time()
+
+    compilation_config: CompilationConfig = vllm_config.compilation_config
+    if compilation_config.level == CompilationLevel.PIECEWISE and \
+        compilation_config.debug_dump_path:
+        import depyf
+        path = os.path.join(compilation_config.debug_dump_path,"rank_0")
+                            # f"rank_{vllm_config.parallel_config.rank}")
+        global context_manager
+        context_manager = depyf.prepare_debug(path)
+        context_manager.__enter__()
+
+
+def end_monitoring_torch_compile(vllm_config: Config):
+    compilation_config: CompilationConfig = vllm_config.compilation_config
+    if compilation_config.level == CompilationLevel.PIECEWISE:
+        global context_manager
+        if context_manager is not None:
+            context_manager.__exit__(None, None, None)
+            context_manager = None

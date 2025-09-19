@@ -4,9 +4,67 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
+from dataclasses import dataclass
+from transformers import AutoConfig
+from typing import Optional, Any, ClassVar
+from dataclasses import field
 from aiter import QuantType
 from aiter.utility.dtypes import d_dtypes
 from transformers import AutoConfig, PretrainedConfig
+import enum
+import hashlib
+
+CUDA_CAPTURE = True
+
+def get_capture_status() -> bool:
+    return CUDA_CAPTURE
+
+def set_capture_status(capture):
+    global CUDA_CAPTURE
+    CUDA_CAPTURE =  capture
+
+
+class CUDAGraphMode(enum.Enum):
+    """ Constants for the cudagraph mode in CompilationConfig.
+    Meanwhile, the subset enum `NONE`, `PIECEWISE` and `FULL` are also
+    treated as concrete runtime mode for cudagraph runtime dispatching.
+    """
+    NONE = 0
+    PIECEWISE = 1
+    FULL = 2
+    FULL_DECODE_ONLY = (FULL, NONE)
+    FULL_AND_PIECEWISE = (FULL, PIECEWISE)
+
+    def decode_mode(self) -> 'CUDAGraphMode':
+        return CUDAGraphMode(self.value[0]) if \
+            self.separate_routine() else self
+
+    def mixed_mode(self) -> 'CUDAGraphMode':
+        return CUDAGraphMode(self.value[1]) if \
+            self.separate_routine() else self
+
+    def requires_piecewise_compilation(self) -> bool:
+        return (self.decode_mode() == CUDAGraphMode.PIECEWISE
+                or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
+
+    def max_cudagraph_mode(self) -> 'CUDAGraphMode':
+        return CUDAGraphMode(max(
+            self.value)) if self.separate_routine() else self
+
+    def has_full_cudagraphs(self) -> bool:
+        return self.max_cudagraph_mode() == CUDAGraphMode.FULL
+
+    def separate_routine(self) -> bool:
+        return isinstance(self.value, tuple)
+
+
+
+class CompilationLevel:
+    # constants for the levels of the compilation process
+    NO_COMPILATION = 0
+    DYNAMO_AS_IS = 1
+    DYNAMO_ONCE = 2
+    PIECEWISE = 3
 
 
 @dataclass
@@ -30,13 +88,127 @@ class CompilationConfig:
     pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
+    debug_dump_path: str = ""
+    """The path to dump the debug information."""
 
+    """custom ops that are disabled"""
+    traced_files: set[str] = field(default_factory=set, init=False)
+
+    cache_dir: str = ""
+
+    # CudaGraph compilation
+    cudagraph_mode: Optional[CUDAGraphMode] = None
+    """
+    The mode of the cudagraph:
+
+    - NONE, no cudagraph capture.
+    - PIECEWISE. (v1 default)
+    - FULL.
+    - FULL_DECODE_ONLY.
+    - FULL_AND_PIECEWISE.
+
+    PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
+    incompatiable ops (i.e. some attention ops) outside the cudagraph
+    for general flexibility.
+    This is the default mode.
+
+    FULL mode: Capture full cudagraph for all batches. Can be good for small
+    models or workloads with small prompts; not supported by many backends.
+    Generally for performance FULL_AND_PIECEWISE is better.
+    
+    FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
+    Mixed prefill-decode batches are run without cudagraphs. Can be good for
+    decode instances in a P/D setup where prefill is not as important so we
+    can save some memory.
+    
+    FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
+    piecewise cudagraph for prefill and mixed prefill-decode batches.
+    This is like the most performant mode for most models.
+
+    Currently, the cudagraph mode is only used for the v1 engine.
+    Note that the cudagraph logic is generally orthogonal to the 
+    compilation logic. While piecewise cudagraphs require piecewise 
+    compilation (level=PIECEWISE and non-empty splitting_ops), full
+    cudagraphs are supported with and without compilation.
+    
+    Warning: This flag is new and subject to change in addition 
+    more modes may be added.
+    """
+
+    compilation_time: float = field(default=0.0, init=False)
+
+    splitting_ops: Optional[list[str]] = None
+    """A list of ops to split the full graph into subgraphs, used in piecewise
+    compilation."""
+
+    # splitting_ops: Optional[list[str]] = field(default_factory=list)
+
+
+    cudagraph_copy_inputs: bool = False
+    """Whether to copy input tensors for
+    cudagraph. If the caller can guarantee that the same input buffers
+    are always used, it can set this to False. Otherwise, it should
+    set this to True, and the compiler will copy the input to an
+    internally managed buffer. Default is False. 
+    Note that this flag is only effective when cudagraph_mode is PIECEWISE.
+    """
+
+    _attention_ops: ClassVar[list[str]] = [
+        "aiter.wrapper_fmha_v3_varlen_fwd",        
+        # "vllm.unified_attention",
+        # "vllm.unified_attention_with_output",
+        # "vllm.mamba_mixer2",
+        # "vllm.mamba_mixer",
+        # "vllm.short_conv",
+        # "vllm.linear_attention",
+    ]
 
     def __post_init__(self):
         if self.level not in {0, 1, 2, 3}:
             raise ValueError("level must in 0-3")
         if not self.cuda_graph_sizes:
             self.cuda_graph_sizes = [512]
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: list[Any] = []
+        factors.append(self.level)
+        factors.append(self.use_cudagraph)
+        factors.append(self.local_cache_dir)
+        factors.append(self.cudagraph_capture_sizes)
+        factors.append(self.cuda_graph_sizes)
+        factors.append(self.debug_dump_path)
+        factors.append(self.traced_files)
+        factors.append(self.cache_dir)
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
+
+    def set_splitting_ops_for_v1(self):
+        # NOTE: this function needs to be called only when level is
+        # CompilationLevel.PIECEWISE
+        assert self.level == CompilationLevel.PIECEWISE, (
+            "set_splitting_ops_for_v1 should only be called when "
+            "level is CompilationLevel.PIECEWISE")
+
+        if self.splitting_ops is None:
+            # NOTE: When using full cudagraph, instead of setting an empty
+            # list and capture the full cudagraph inside the flattened fx
+            # graph, we keep the piecewise fx graph structure but capture the
+            # full cudagraph outside the fx graph. This reduces some cpu
+            # overhead when the runtime batch_size is not cudagraph captured.
+            # see https://github.com/vllm-project/vllm/pull/20059 for details.
+            self.splitting_ops = self._attention_ops
+
 
 
 class QuantizationConfig(dict):
@@ -51,6 +223,27 @@ class QuantizationConfig(dict):
 
     def get_name(self):
         return self["quant_name"]
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: list[Any] = []
+        factors.append(self["quant_type"])
+        factors.append(self["quant_dtype"])
+        factors.append(self["quant_name"])
+        factors.append(self["is_dynamic"])
+        str_factors = str(factors)
+        # assert_hashable(str_factors)
+        return hashlib.sha256(str(factors).encode()).hexdigest()
 
 
 def get_quant_config(config: PretrainedConfig) -> QuantizationConfig:
@@ -146,3 +339,34 @@ class Config:
         assert self.torch_profiler_dir is None or os.path.isdir(
             self.torch_profiler_dir
         ), f"torch_profiler_dir {self.torch_profiler_dir} is not a valid directory"
+        if self.compilation_config.level == CompilationLevel.PIECEWISE:
+            self.compilation_config.set_splitting_ops_for_v1()
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: list[Any] = []
+
+        # summarize vllm config
+        vllm_factors: list[Any] = []
+        if self.quant_config:
+            vllm_factors.append(self.quant_config.compute_hash())
+
+        if self.compilation_config:
+            vllm_factors.append(self.compilation_config.compute_hash())
+
+        factors.append(vllm_factors)
+
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()[:10]
+        return hash_str
+
