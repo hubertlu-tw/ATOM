@@ -36,10 +36,12 @@ class Qwen3Attention(nn.Module):
         rope_theta: float = 10000,
         rope_scaling: tuple | None = None,
         kv_cache_dtype: str = "fp16",
+        layer_num: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         tp_size = get_tp_group().world_size
+        self.layer_num = layer_num
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -78,6 +80,7 @@ class Qwen3Attention(nn.Module):
             self.scaling,
             self.num_kv_heads,
             kv_cache_dtype=kv_cache_dtype,
+            layer_num=layer_num,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -138,8 +141,10 @@ class Qwen3DecoderLayer(nn.Module):
         config: Qwen3Config,
         cache_config: str = "bf16",
         quant_config: Optional[QuantizationConfig] = None,
+        layer_num: int = 0,
     ) -> None:
         super().__init__()
+        self.layer_num = layer_num
         self.self_attn = Qwen3Attention(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -151,6 +156,7 @@ class Qwen3DecoderLayer(nn.Module):
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
             kv_cache_dtype=cache_config,
+            layer_num=layer_num
             # quant_config=quant_config,
         )
         self.mlp = Qwen3MLP(
@@ -175,7 +181,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        # hidden_states = self.self_attn(positions, hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -195,9 +201,9 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, cache_config=cache_config, quant_config=quant_config
+                    config, cache_config=cache_config, quant_config=quant_config, layer_num = layer_num
                 )
-                for _ in range(config.num_hidden_layers)
+                for layer_num in range(config.num_hidden_layers)
             ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

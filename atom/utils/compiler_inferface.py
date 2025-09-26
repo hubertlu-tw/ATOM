@@ -462,3 +462,93 @@ class InductorAdaptor(CompilerInterface):
             return torch._dynamo.utils.get_metrics_context()
         else:
             return contextlib.nullcontext()
+
+
+
+class InductorStandaloneAdaptor(CompilerInterface):
+    """
+    The adaptor for the Inductor compiler.
+    Requires PyTorch 2.8+.
+    This is not on by default yet, but we plan to turn it on by default for
+    PyTorch 2.8.
+
+    Use VLLM_USE_STANDALONE_COMPILE to toggle this on or off.
+    """
+    name = "inductor_standalone"
+
+    def compute_hash(self, vllm_config: Config) -> str:
+        factors = get_inductor_factors()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()[:10]
+        return hash_str
+
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
+        self.cache_dir = cache_dir
+
+    def compile(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
+        runtime_shape: Optional[int] = None,
+        key: Optional[str] = None,
+    ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
+        current_config = {}
+        if compiler_config is not None:
+            current_config.update(compiler_config)
+        set_inductor_config(current_config, runtime_shape)
+
+        if isinstance(runtime_shape, int):
+            dynamic_shapes = "from_example_inputs"
+        else:
+            dynamic_shapes = "from_tracing_context"
+
+        from torch._inductor import standalone_compile
+
+        # TODO Lirong
+        # with pass_context(runtime_shape):
+        compiled_graph = standalone_compile(
+                graph,
+                example_inputs,
+                dynamic_shapes=dynamic_shapes,
+                options={"config_patches": current_config})
+
+        # Save the compiled artifact to disk in the specified path
+        assert key is not None
+        path = os.path.join(self.cache_dir, key)
+        if True:
+        # if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            compiled_graph.save(path=path, format="unpacked")
+            compilation_counter.num_compiled_artifacts_saved += 1
+        return compiled_graph, (key, path)
+
+    def load(self,
+             handle: Any,
+             graph: fx.GraphModule,
+             example_inputs: list[Any],
+             graph_index: int,
+             runtime_shape: Optional[int] = None) -> Callable:
+        assert isinstance(handle, tuple)
+        assert isinstance(handle[0], str)
+        assert isinstance(handle[1], str)
+        path = handle[1]
+        inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
+            path=path, format="unpacked")
+        from torch._inductor.compile_fx import graph_returns_tuple
+        returns_tuple = graph_returns_tuple(graph)
+
+        def compiled_graph_wrapper(*args):
+            graph_output = inductor_compiled_graph(*args)
+            # unpack the tuple if needed
+            # TODO(rzou): the implication is that we're not
+            # reading the python bytecode correctly in vLLM?
+            if returns_tuple:
+                return graph_output
+            else:
+                return graph_output[0]
+
+        return compiled_graph_wrapper

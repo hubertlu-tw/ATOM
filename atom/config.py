@@ -1,9 +1,6 @@
 import os
-import re
-from dataclasses import dataclass, field
-from typing import Optional
-
 import torch
+import re
 from dataclasses import dataclass
 from transformers import AutoConfig
 from typing import Optional, Any, ClassVar
@@ -76,7 +73,10 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    use_cudagraph: bool = field(default_factory=lambda: 0)
+    # use_cudagraph: bool = field(default_factory=lambda: 0)
+
+    use_cudagraph: bool = True
+
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     # cudagraph_capture_sizes: Optional[list[int]] = [1,2,4,8]
     cudagraph_capture_sizes: Optional[list[int]] = None
@@ -96,6 +96,8 @@ class CompilationConfig:
 
     cache_dir: str = ""
 
+    use_inductor: bool = True
+    
     # CudaGraph compilation
     cudagraph_mode: Optional[CUDAGraphMode] = None
     """
@@ -154,7 +156,9 @@ class CompilationConfig:
     """
 
     _attention_ops: ClassVar[list[str]] = [
-        "aiter.wrapper_fmha_v3_varlen_fwd",        
+        "aiter.unified_attention_with_output"
+
+        # "aiter.wrapper_fmha_v3_varlen_fwd",        
         # "vllm.unified_attention",
         # "vllm.unified_attention_with_output",
         # "vllm.mamba_mixer2",
@@ -162,6 +166,33 @@ class CompilationConfig:
         # "vllm.short_conv",
         # "vllm.linear_attention",
     ]
+
+    inductor_compile_config: dict = field(default_factory=dict)
+    """Additional configurations for inductor.
+    - None: use default configurations."""
+
+    compile_sizes: Optional[list[Union[int, str]]] = None
+    """Sizes to compile for inductor. In addition
+    to integers, it also supports "cudagraph_capture_sizes" to
+    specify the sizes for cudagraph capture."""
+
+    def init_with_cudagraph_sizes(self) -> None:
+        """To complete the initialization of config,
+        we need to know the cudagraph sizes."""
+        computed_compile_sizes = []
+        if self.compile_sizes is not None:
+            # de-duplicate the sizes provided by the config
+            self.compile_sizes = list(set(self.compile_sizes))
+            for x in self.compile_sizes:
+                if isinstance(x, str):
+                    assert x == "cudagraph_capture_sizes", \
+                    "Unrecognized size type in compile_sizes, " \
+                    f"expect 'cudagraph_capture_sizes', got {x}"
+                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
+                else:
+                    assert isinstance(x, int)
+                    computed_compile_sizes.append(x)
+        self.compile_sizes = computed_compile_sizes  # type: ignore
 
     def __post_init__(self):
         if self.level not in {0, 1, 2, 3}:
@@ -187,9 +218,6 @@ class CompilationConfig:
         factors.append(self.local_cache_dir)
         factors.append(self.cudagraph_capture_sizes)
         factors.append(self.cuda_graph_sizes)
-        factors.append(self.debug_dump_path)
-        factors.append(self.traced_files)
-        factors.append(self.cache_dir)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
 
@@ -323,8 +351,6 @@ class Config:
     torch_profiler_dir: str | None = os.getenv("ATOM_TORCH_PROFILER_DIR", None)
     compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
     quant_config: QuantizationConfig = field(default_factory=lambda: QuantizationConfig())
-    asyncio_mode: bool = False
-    master_addr: str = "127.0.0.1"
 
     def __post_init__(self):
         # assert os.path.isdir(self.model)
@@ -341,6 +367,10 @@ class Config:
         ), f"torch_profiler_dir {self.torch_profiler_dir} is not a valid directory"
         if self.compilation_config.level == CompilationLevel.PIECEWISE:
             self.compilation_config.set_splitting_ops_for_v1()
+            self._set_cudagraph_sizes()
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            self.compilation_config.init_with_cudagraph_sizes()
+
 
     def compute_hash(self) -> str:
         """

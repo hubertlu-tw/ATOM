@@ -24,6 +24,7 @@ from atom.models.qwen3 import Qwen3ForCausalLM
 from atom.utils.context import get_context, reset_context, set_context
 
 logger = logging.getLogger("atom")
+from atom.utils.forward_context import AttentionMetadata, set_forward_context
 
 suppot_model_arch_dict = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
@@ -256,6 +257,13 @@ class ModelRunner:
                 if config.kv_cache_dtype == "fp8":
                     module.k_scale = self.kv_scale[0, layer_id]
                     module.v_scale = self.kv_scale[1, layer_id]
+                attention_metadata = AttentionMetadata(
+                    k_cache=module.k_cache,
+                    v_cache=module.v_cache,
+                    k_scale=module.k_scale,
+                    v_scale=module.v_scale
+                )
+                set_forward_context(module.layer_num, attention_metadata)
 
                 layer_id += 1
 

@@ -303,7 +303,7 @@ import copy
 import dataclasses
 from contextlib import contextmanager
 from typing import Union, Any
-from atom.config import get_capture_status, CompilationConfig, Config
+from atom.config import CompilationConfig, Config
 from atom.config import CompilationLevel
 import time
 

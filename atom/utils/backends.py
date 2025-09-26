@@ -15,7 +15,7 @@ import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
-from .compiler_inferface import InductorAdaptor, CompilerInterface
+from .compiler_inferface import InductorAdaptor, CompilerInterface, InductorStandaloneAdaptor
 from atom.utils import is_torch_equal_or_newer
 from aiter import logger
 from atom.config import CompilationConfig, Config, CUDAGraphMode
@@ -43,17 +43,17 @@ def get_static_graph_wrapper_cls(cls) -> str:
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    return InductorAdaptor()
-    # if compilation_config.use_inductor:
-    #     if is_torch_equal_or_newer(
-    #             "2.8.0.dev"):
-    #         logger.debug("Using InductorStandaloneAdaptor")
-    #         return InductorStandaloneAdaptor()
-    #     else:
-    #         logger.debug("Using InductorAdaptor")
-    #         return InductorAdaptor()
+    # return InductorAdaptor()
+    if compilation_config.use_inductor:
+        if is_torch_equal_or_newer(
+                "2.8.0.dev"):
+            print("Using InductorStandaloneAdaptor")
+            return InductorStandaloneAdaptor()
+        else:
+            print("Using InductorAdaptor")
+            return InductorAdaptor()
     # else:
-    #     logger.debug("Using EagerAdaptor")
+    #     logger.info("Using EagerAdaptor")
     #     return EagerAdaptor()
 
 
@@ -135,11 +135,11 @@ class CompilerManager:
         compiled_graph = self.compiler.load(handle, graph, example_inputs,
                                             graph_index, runtime_shape)
         if runtime_shape is None:
-            logger.debug(
+            logger.info(
                 "Directly load the %s-th graph for dynamic shape from %s via "
                 "handle %s", graph_index, self.compiler.name, handle)
         else:
-            logger.debug(
+            logger.info(
                 "Directly load the %s-th graph for shape %s from %s via "
                 "handle %s", graph_index, str(runtime_shape),
                 self.compiler.name, handle)
@@ -213,11 +213,11 @@ class CompilerManager:
                     logger.info("Cache the graph of shape %s for later use",
                                 str(runtime_shape))
             if runtime_shape is None:
-                logger.debug(
+                logger.info(
                     "Store the %s-th graph for dynamic shape from %s via "
                     "handle %s", graph_index, self.compiler.name, handle)
             else:
-                logger.debug(
+                logger.info(
                     "Store the %s-th graph for shape %s from %s via handle %s",
                     graph_index, str(runtime_shape), self.compiler.name,
                     handle)
@@ -297,94 +297,94 @@ def split_graph(graph: fx.GraphModule,
 compilation_start_time = 0.0
 
 
-# class PiecewiseCompileInterpreter(torch.fx.Interpreter):
-#     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
-#     It runs the given graph with fake inputs, and compile some
-#     submodules specified by `compile_submod_names` with the given
-#     compilation configs.
+class PiecewiseCompileInterpreter(torch.fx.Interpreter):
+    """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
+    It runs the given graph with fake inputs, and compile some
+    submodules specified by `compile_submod_names` with the given
+    compilation configs.
 
-#     NOTE: the order in `compile_submod_names` matters, because
-#     it will be used to determine the order of the compiled piecewise
-#     graphs. The first graph will handle logging, and the last graph
-#     has some special cudagraph output handling.
-#     """
+    NOTE: the order in `compile_submod_names` matters, because
+    it will be used to determine the order of the compiled piecewise
+    graphs. The first graph will handle logging, and the last graph
+    has some special cudagraph output handling.
+    """
 
-#     def __init__(self, module: torch.fx.GraphModule,
-#                  compile_submod_names: list[str], vllm_config: Config,
-#                  vllm_backend: "VllmBackend"):
-#         super().__init__(module)
-#         from torch._guards import detect_fake_mode
-#         self.fake_mode = detect_fake_mode()
-#         self.compile_submod_names = compile_submod_names
-#         self.compilation_config = vllm_config.compilation_config
-#         self.vllm_config = vllm_config
-#         self.vllm_backend = vllm_backend
-#         # When True, it annoyingly dumps the torch.fx.Graph on errors.
-#         self.extra_traceback = False
+    def __init__(self, module: torch.fx.GraphModule,
+                 compile_submod_names: list[str], vllm_config: Config,
+                 vllm_backend: "VllmBackend"):
+        super().__init__(module)
+        from torch._guards import detect_fake_mode
+        self.fake_mode = detect_fake_mode()
+        self.compile_submod_names = compile_submod_names
+        self.compilation_config = vllm_config.compilation_config
+        self.vllm_config = vllm_config
+        self.vllm_backend = vllm_backend
+        # When True, it annoyingly dumps the torch.fx.Graph on errors.
+        self.extra_traceback = False
 
-#     def run(self, *args):
-#         fake_args = [
-#             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
-#             for t in args
-#         ]
-#         with self.fake_mode, enable_python_dispatcher():
-#             return super().run(*fake_args)
+    def run(self, *args):
+        fake_args = [
+            self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
+            for t in args
+        ]
+        with self.fake_mode, enable_python_dispatcher():
+            return super().run(*fake_args)
 
-#     def call_module(self, target: torch.fx.node.Target,
-#                     args: tuple[torch.fx.node.Argument,
-#                                 ...], kwargs: dict[str, Any]) -> Any:
-#         assert isinstance(target, str)
-#         output = super().call_module(target, args, kwargs)
+    def call_module(self, target: torch.fx.node.Target,
+                    args: tuple[torch.fx.node.Argument,
+                                ...], kwargs: dict[str, Any]) -> Any:
+        assert isinstance(target, str)
+        output = super().call_module(target, args, kwargs)
 
-#         if target in self.compile_submod_names:
-#             index = self.compile_submod_names.index(target)
-#             submod = self.fetch_attr(target)
-#             sym_shape_indices = [
-#                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
-#             ]
-#             global compilation_start_time
-#             compiled_graph_for_dynamic_shape = self.vllm_backend.\
-#                 compiler_manager.compile(
-#                 submod,
-#                 args,
-#                 self.compilation_config.inductor_compile_config,
-#                 self.compilation_config,
-#                 graph_index=index,
-#                 num_graphs=len(self.compile_submod_names),
-#                 runtime_shape=None)
-#             # Lazy import here to avoid circular import
-#             from .cuda_graph import CUDAGraphOptions
-#             from .cuda_piecewise_backend import PiecewiseBackend
+        if target in self.compile_submod_names:
+            index = self.compile_submod_names.index(target)
+            submod = self.fetch_attr(target)
+            sym_shape_indices = [
+                i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
+            ]
+            global compilation_start_time
+            compiled_graph_for_dynamic_shape = self.vllm_backend.\
+                compiler_manager.compile(
+                submod,
+                args,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
+                graph_index=index,
+                num_graphs=len(self.compile_submod_names),
+                runtime_shape=None)
+            # Lazy import here to avoid circular import
+            from .cuda_graph import CUDAGraphOptions
+            from .cuda_piecewise_backend import PiecewiseBackend
 
-#             piecewise_backend = PiecewiseBackend(
-#                 submod, self.vllm_config, index,
-#                 len(self.compile_submod_names), sym_shape_indices,
-#                 compiled_graph_for_dynamic_shape, self.vllm_backend)
+            piecewise_backend = PiecewiseBackend(
+                submod, self.vllm_config, index,
+                len(self.compile_submod_names), sym_shape_indices,
+                compiled_graph_for_dynamic_shape, self.vllm_backend)
 
-#             if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-#                 # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
-#                 # class) as platform dependent.
-#                 static_graph_wrapper_class = resolve_obj_by_qualname(
-#                     get_static_graph_wrapper_cls())
+            # if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            #     # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
+            #     # class) as platform dependent.
+            #     static_graph_wrapper_class = resolve_obj_by_qualname(
+            #         get_static_graph_wrapper_cls())
 
-#                 # Always assign PIECEWISE runtime mode to the
-#                 # CUDAGraphWrapper for piecewise_backend, to distinguish
-#                 # it from the FULL cudagraph runtime mode, no matter it
-#                 # is wrapped on a full or piecewise fx graph.
-#                 self.module.__dict__[target] = static_graph_wrapper_class(
-#                     runnable=piecewise_backend,
-#                     vllm_config=self.vllm_config,
-#                     runtime_mode=CUDAGraphMode.PIECEWISE,
-#                     cudagraph_options=CUDAGraphOptions(
-#                         debug_log_enable=piecewise_backend.is_first_graph,
-#                         gc_disable=not piecewise_backend.is_first_graph,
-#                         weak_ref_output=piecewise_backend.is_last_graph))
-#             else:
-#                 self.module.__dict__[target] = piecewise_backend
+            #     # Always assign PIECEWISE runtime mode to the
+            #     # CUDAGraphWrapper for piecewise_backend, to distinguish
+            #     # it from the FULL cudagraph runtime mode, no matter it
+            #     # is wrapped on a full or piecewise fx graph.
+            #     self.module.__dict__[target] = static_graph_wrapper_class(
+            #         runnable=piecewise_backend,
+            #         vllm_config=self.vllm_config,
+            #         runtime_mode=CUDAGraphMode.PIECEWISE,
+            #         cudagraph_options=CUDAGraphOptions(
+            #             debug_log_enable=piecewise_backend.is_first_graph,
+            #             gc_disable=not piecewise_backend.is_first_graph,
+            #             weak_ref_output=piecewise_backend.is_last_graph))
+            # else:
+            self.module.__dict__[target] = piecewise_backend
 
-#             compilation_counter.num_piecewise_capturable_graphs_seen += 1
+            compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
-#         return output
+        return output
 
 
 # the tag for the part of model being compiled,
@@ -506,7 +506,7 @@ class VllmBackend:
             forward_code_files = list(
                 sorted(self.compilation_config.traced_files))
             self.compilation_config.traced_files.clear()
-            logger.debug(
+            logger.info(
                 "Traced files (to be considered for compilation cache):\n%s",
                 "\n".join(forward_code_files))
             hash_content = []
@@ -535,6 +535,8 @@ class VllmBackend:
                 VLLM_CACHE_ROOT,
                 "torch_compile_cache",
                 hash_key,
+                # "996ff366ca",
+                # "e6292aa343",
             )
             self.compilation_config.cache_dir = cache_dir
 
@@ -592,12 +594,13 @@ class VllmBackend:
             item.submod_name for item in self.piecewise_graphs
             if not item.is_splitting_graph
         ]
+        print("submod_names_to_compile", submod_names_to_compile)
 
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
-        # PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-        #                             self.vllm_config,
-        #                             self).run(*example_inputs)
+        PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
+                                    self.vllm_config,
+                                    self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
@@ -609,7 +612,7 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug("Computation graph saved to %s", graph_path)
+            logger.info("Computation graph saved to %s", graph_path)
 
         self._called = True
         print('This is cudagraph_mode', self.compilation_config.cudagraph_mode)

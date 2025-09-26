@@ -10,7 +10,7 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 import torch
 import torch.nn as nn
 
-from atom.config import get_capture_status, CompilationConfig, Config
+from atom.config import CompilationConfig, Config
 from atom.utils import start_monitoring_torch_compile
 from atom.config import CompilationLevel
 
@@ -56,7 +56,6 @@ class TorchCompileWrapperWithCustomDispatcher:
             # default compilation settings
             # compiling the forward method
             options = None
-            # print("Torch compile 000000000000000000000000000")
             backend = init_backend(vllm_config)
             compiled_callable = torch.compile(
                 self.forward,
@@ -217,7 +216,6 @@ def _support_torch_compile(
             atom_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
         ] 
-        # or (get_capture_status())
         # print("self.do_not_compile",self.do_not_compile)
         if self.do_not_compile:
             return
