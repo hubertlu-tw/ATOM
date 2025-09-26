@@ -72,8 +72,8 @@ class ModelRunner:
             self.capture_cudagraph()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
-        # if self.config.compilation_config.level == 1:
-        # self.model = torch.compile(self.model, fullgraph=True, backend="eager")
+        if self.config.compilation_config.level == 1:
+            self.model = torch.compile(self.model, fullgraph=True, backend="eager")
 
         if self.world_size > 1:
             if rank == 0:
@@ -478,9 +478,6 @@ class ModelRunner:
                 if get_tensor_model_parallel_rank() == 0:
                     capture_range.set_description(f"Capturing {bs=}")
                 graph = torch.cuda.CUDAGraph()
-
-                cu_seqlens_q = torch.arange(0, bs + 1, dtype=torch.int32, device='cuda')
-                cu_seqlens_k = cu_seqlens_q.clone()
 
                 set_context(
                     False,
