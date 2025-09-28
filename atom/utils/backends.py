@@ -26,21 +26,6 @@ def get_static_graph_wrapper_cls(cls) -> str:
     return "atom.utils.cuda_graph.CUDAGraphWrapper"
 
 
-# import vllm.envs as envs
-# from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-# from vllm.logger import init_logger
-# from vllm.platforms import current_platform
-# from atom.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
-
-# from .compiler_interface import (CompilerInterface, EagerAdaptor,
-#                                  InductorAdaptor, InductorStandaloneAdaptor)
-# from .counter import compilation_counter
-# from .inductor_pass import InductorPass
-# from .pass_manager import PostGradPassManager
-
-# logger = init_logger(__name__)
-
-
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     # return InductorAdaptor()
@@ -135,11 +120,11 @@ class CompilerManager:
         compiled_graph = self.compiler.load(handle, graph, example_inputs,
                                             graph_index, runtime_shape)
         if runtime_shape is None:
-            logger.info(
+            logger.debug(
                 "Directly load the %s-th graph for dynamic shape from %s via "
                 "handle %s", graph_index, self.compiler.name, handle)
         else:
-            logger.info(
+            logger.debug(
                 "Directly load the %s-th graph for shape %s from %s via "
                 "handle %s", graph_index, str(runtime_shape),
                 self.compiler.name, handle)
@@ -213,11 +198,11 @@ class CompilerManager:
                     logger.info("Cache the graph of shape %s for later use",
                                 str(runtime_shape))
             if runtime_shape is None:
-                logger.info(
+                logger.debug(
                     "Store the %s-th graph for dynamic shape from %s via "
                     "handle %s", graph_index, self.compiler.name, handle)
             else:
-                logger.info(
+                logger.debug(
                     "Store the %s-th graph for shape %s from %s via handle %s",
                     graph_index, str(runtime_shape), self.compiler.name,
                     handle)
@@ -506,7 +491,7 @@ class VllmBackend:
             forward_code_files = list(
                 sorted(self.compilation_config.traced_files))
             self.compilation_config.traced_files.clear()
-            logger.info(
+            logger.debug(
                 "Traced files (to be considered for compilation cache):\n%s",
                 "\n".join(forward_code_files))
             hash_content = []
@@ -594,7 +579,6 @@ class VllmBackend:
             item.submod_name for item in self.piecewise_graphs
             if not item.is_splitting_graph
         ]
-        print("submod_names_to_compile", submod_names_to_compile)
 
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
@@ -615,7 +599,6 @@ class VllmBackend:
             logger.info("Computation graph saved to %s", graph_path)
 
         self._called = True
-        print('This is cudagraph_mode', self.compilation_config.cudagraph_mode)
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:

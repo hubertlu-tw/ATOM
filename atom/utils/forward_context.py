@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 import torch
 
 
-from aiter.jit.utils.torch_guard import torch_compile_guard
-
 @dataclass
 class AttentionMetadata:
     k_cache: torch.Tensor
@@ -14,15 +12,6 @@ class AttentionMetadata:
     k_scale: torch.Tensor
     v_scale: torch.Tensor
 
-
-# @torch_compile_guard()
-def set_attn_meta(k_cache: torch.Tensor, v_cache: torch.Tensor, 
-            k_scale: torch.Tensor, v_scale: torch.Tensor) -> None:
-    attn_metadata = AttentionMetadata()
-    attn_metadata.k_cache = k_cache
-    attn_metadata.v_cache = v_cache
-    attn_metadata.k_scale = k_scale
-    attn_metadata.v_scale = v_scale
 
 
 @dataclass

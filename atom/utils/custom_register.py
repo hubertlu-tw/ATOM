@@ -5,8 +5,6 @@ from aiter import logger
 aiter_lib = Library("aiter", "FRAGMENT")
 
 
-# from flash_attn import flash_attn_with_kvcache
-
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from typing import Callable, Optional, TypeVar, Union, overload
 import inspect
 import os,sys
@@ -15,17 +18,6 @@ from atom.utils import start_monitoring_torch_compile
 from atom.config import CompilationLevel
 
 _T = TypeVar("_T", bound=type[nn.Module])
-
-# _current_vllm_config: Optional[Config] = None
-
-# def get_current_vllm_config() -> Config:
-#     if _current_vllm_config is None:
-#         # in ci, usually when we test custom ops/modules directly,
-#         # we don't set the vllm config. In that case, we set a default
-#         # config.
-#         from atom.config import Config
-#         return Config()
-#     return _current_vllm_config
 
 
 def init_backend(config: Config):
