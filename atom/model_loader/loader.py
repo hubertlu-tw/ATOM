@@ -1,4 +1,4 @@
-import os
+import os, re
 from glob import glob
 import torch
 from torch import nn
@@ -6,14 +6,15 @@ from safetensors import safe_open
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from atom.model_loader.weight_utils import download_weights_from_hf, filter_duplicate_safetensors_files
 from atom.model_ops.base_config import QuantizeMethodBase
+from transformers import AutoConfig
 from tqdm import tqdm
-
+from atom.model_ops.moe import is_rocm_aiter_fusion_shared_expert_enabled
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
 
 
-def load_model(model: nn.Module, model_name_or_path: str):
+def load_model(model: nn.Module, model_name_or_path: str, hf_config: AutoConfig, load_dummy:bool = False):
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     is_path = os.path.isdir(model_name_or_path)
     path = (
@@ -23,8 +24,11 @@ def load_model(model: nn.Module, model_name_or_path: str):
             model_name_or_path, None, ["*.safetensors"], ignore_patterns=["original/*"]
         )
     )
+    params_dict = dict(model.named_parameters())
     hf_weights_files = filter_duplicate_safetensors_files(glob(os.path.join(path, "*.safetensors")), path, SAFE_WEIGHTS_INDEX_NAME)
     for file in tqdm(hf_weights_files):
+        if load_dummy:
+            continue
         print(f"Loading weights from {file}")
         with safe_open(file, "pt", "cpu") as f:
             for name in f.keys():
@@ -37,7 +41,20 @@ def load_model(model: nn.Module, model_name_or_path: str):
                     name = name.replace(
                         "weight_scale_inv", "weight_scale"
                     )
+                layerId_ = re.search(r'model\.layers\.(\d+)\.', name)
+                layerId = int(layerId_.group(1)) if layerId_ else 0
+                if hf_config.num_hidden_layers and layerId >= hf_config.num_hidden_layers:
+                    # print(f"Skipping loading {name} as layerId {layerId} >= num_hidden_layers {hf_config.num_hidden_layers}")
+                    continue
+                if (is_rocm_aiter_fusion_shared_expert_enabled()
+                    and "mlp.shared_experts" in name):
+                    name = name.replace(
+                        "mlp.shared_experts",
+                        f"mlp.experts.{hf_config.n_routed_experts}")
                 for k in packed_modules_mapping:
+                    # We handle the experts below in expert_params_mapping
+                    if ("mlp.experts." in name and name not in params_dict):
+                        continue
                     if k in name:
                         v, shard_id = packed_modules_mapping[k]
                         param_name = name.replace(k, v)
