@@ -334,6 +334,13 @@ class ModelRunner:
                     576,
                 )
                 module.max_model_len = self.config.max_model_len
+                attention_metadata = AttentionMetadata(
+                    k_cache=module.kv_cache,
+                    v_cache=None,
+                    k_scale=None,
+                    v_scale=None,
+                )
+                set_forward_context(module.layer_num, attention_metadata)
                 layer_id += 1
         return True
 

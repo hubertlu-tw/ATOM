@@ -33,7 +33,7 @@ def init_aiter_topK_meta_data(
         dtype=torch.int32,
         device="cuda",
     )
-    ns_topk_ids, s_topk_ids = total_topk_ids.split(
+    ns_topk_ids, s_topk_ids = torch.split(total_topk_ids,
         [top_k, n_shared_experts + is_EP], dim=1
     )
     shared_expert_ids = [n_routed_experts + i for i in range(n_shared_experts + is_EP)]
@@ -52,7 +52,7 @@ def init_aiter_topK_meta_data(
         dtype=torch.float32,
         device="cuda",
     )
-    ns_topk_weights, s_topk_weights = total_topk_weights.split(
+    ns_topk_weights, s_topk_weights = torch.split(total_topk_weights,
         [top_k, n_shared_experts + is_EP], dim=1
     )
     s_topk_weights.fill_(shared_experts_score)
@@ -81,10 +81,10 @@ def rocm_aiter_topk_softmax_impl(
         )
         total_topk_weights = total_topk_weights[:token]
         total_topk_ids = total_topk_ids[:token]
-        topk_weights, _ = total_topk_weights.split(
+        topk_weights, _ = torch.split(total_topk_weights,
             [topk, total_topk_weights.shape[1] - topk], dim=1
         )
-        topk_ids, _ = total_topk_ids.split(
+        topk_ids, _ = torch.split(total_topk_ids,
             [topk, total_topk_ids.shape[1] - topk], dim=1
         )
     else:
@@ -141,10 +141,10 @@ def rocm_aiter_biased_grouped_topk_impl(
         )
         total_topk_weights = total_topk_weights[:token]
         total_topk_ids = total_topk_ids[:token]
-        topk_weights, _ = total_topk_weights.split(
+        topk_weights, _ = torch.split(total_topk_weights,
             [topk, total_topk_weights.shape[1] - topk], dim=1
         )
-        topk_ids, _ = total_topk_ids.split(
+        topk_ids, _ = torch.split(total_topk_ids,
             [topk, total_topk_ids.shape[1] - topk], dim=1
         )
     else:
@@ -199,10 +199,10 @@ def rocm_aiter_biased_grouped_topk_fake(
         )
         total_topk_weights = total_topk_weights[:token]
         total_topk_ids = total_topk_ids[:token]
-        topk_weights, _ = total_topk_weights.split(
+        topk_weights, _ = torch.split(total_topk_weights,
             [topk, total_topk_weights.shape[1] - topk], dim=1
         )
-        topk_ids, _ = total_topk_ids.split(
+        topk_ids, _ = torch.split(total_topk_ids,
             [topk, total_topk_ids.shape[1] - topk], dim=1
         )
     else:
@@ -242,10 +242,10 @@ def rocm_aiter_grouped_topk_impl(
         )
         total_topk_weights = total_topk_weights[:token]
         total_topk_ids = total_topk_ids[:token]
-        topk_weights, _ = total_topk_weights.split(
+        topk_weights, _ = torch.split(total_topk_weights,
             [topk, total_topk_weights.shape[1] - topk], dim=1
         )
-        topk_ids, _ = total_topk_ids.split(
+        topk_ids, _ = torch.split(total_topk_ids,
             [topk, total_topk_ids.shape[1] - topk], dim=1
         )
     else:
@@ -302,10 +302,10 @@ def rocm_aiter_grouped_topk_fake(
         )
         total_topk_weights = total_topk_weights[:token]
         total_topk_ids = total_topk_ids[:token]
-        topk_weights, _ = total_topk_weights.split(
+        topk_weights, _ = torch.split(total_topk_weights,
             [topk, total_topk_weights.shape[1] - topk], dim=1
         )
-        topk_ids, _ = total_topk_ids.split(
+        topk_ids, _ = torch.split(total_topk_ids,
             [topk, total_topk_ids.shape[1] - topk], dim=1
         )
     else:
