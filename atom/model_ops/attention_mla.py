@@ -7,9 +7,8 @@ from aiter.rotary_embedding import RotaryEmbedding
 from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
     batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,
 )
-from vllm import _custom_ops as ops
 
-from aiter import flash_attn_varlen_func, dtypes
+from aiter import flash_attn_varlen_func, concat_and_cache_mla, dtypes
 from aiter.mla import mla_decode_fwd
 
 from typing import Optional
@@ -282,7 +281,7 @@ class MLAAttention(nn.Module):
             self.rotary_emb(positions, prefill_q_pe, k_pe)
 
             if kv_cache.numel() > 0:
-                ops.concat_and_cache_mla(
+                concat_and_cache_mla(
                     k_c_normed,
                     k_pe.squeeze(1),
                     kv_cache,
@@ -299,7 +298,7 @@ class MLAAttention(nn.Module):
             self.rotary_emb(positions, decode_q_pe, k_pe)
 
             if kv_cache.numel() > 0:
-                ops.concat_and_cache_mla(
+                concat_and_cache_mla(
                     k_c_normed,
                     k_pe.squeeze(1),
                     kv_cache,
