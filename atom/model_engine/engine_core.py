@@ -82,8 +82,12 @@ class EngineCore:
 
             config.num_kvcache_blocks = num_blocks
             if not config.enforce_eager:
-                cap_cost = self.runner_mgr.call_func("capture_cudagraph", wait_out=True)
-                logger.info(f"{self.label}: cudagraph capture cost: {cap_cost} seconds")
+                cap_cost, bs = self.runner_mgr.call_func(
+                    "capture_cudagraph", wait_out=True
+                )
+                logger.info(
+                    f"{self.label}: cudagraph capture{bs} cost: {cap_cost} seconds"
+                )
             good = True
         finally:
             logger.info(

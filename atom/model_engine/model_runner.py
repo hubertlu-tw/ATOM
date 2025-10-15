@@ -623,4 +623,4 @@ class ModelRunner:
                 torch.cuda.synchronize()
                 reset_context()
         self.graph_bs.sort(reverse=False)
-        return time.time() - start_time
+        return time.time() - start_time, self.graph_bs
