@@ -91,28 +91,6 @@ class OutputProcessor:
         token_ids = self.recv_async_output()
         # prev_token_ids, prev_seqs = self.revc_async_output_tuple()
         self.send_to_cpu_async(batch, sampled_token_ids)
-        # return token_ids
-        # return prev_token_ids, prev_seqs
-
-        # deferred_reqIDs = []
-        returned_reqIDs = []
-        for req in batch.seqs:
-            if req.id in self.deferred_request_id:
-                returned_reqIDs.append(req.id)
-            else:
-                self.deferred_request_id.append(req.id)
-
-        if returned_reqIDs:
-            # for ids in self.token_ids_cpu[:-1]:
-            #     ids_list = ids.tolist()
-                for req_id in returned_reqIDs:
-                    self.deferred_request_id.remove(req_id)
-                    # req_index = batch.unfinished_prev_req.index(req_id)
-                    # batch.unfinished_prev_req.remove(req_id)
-                    # req = batch.seqs[req_index]
-                    # req.append_token(ids_list[req_index])
-
-        # self.async_copy_event.synchronize()
 
         return token_ids
 
@@ -159,6 +137,10 @@ class ModelRunner:
                                            dtype=torch.int32)
         self.positions = self._make_buffer(self.config.max_num_batched_tokens,
                                            dtype=torch.int64)
+
+        self.input_ids_index_tensor = CpuGpuBuffer(self.config.max_num_seqs, dtype=torch.int64, device=self.device)
+        self.prev_common_req_indices_tensor = CpuGpuBuffer(self.config.max_num_seqs, dtype=torch.int64, device=self.device)
+
         self.use_async_scheduling = True
         self.async_output_copy_stream = torch.cuda.Stream() if \
             self.use_async_scheduling else None
@@ -462,24 +444,22 @@ class ModelRunner:
             return
         # Upload the index tensors asynchronously
         # so the scatter can be non-blocking.
-        input_ids_index_tensor = torch.tensor(flattened_indices,
-                                              dtype=torch.int64,
-                                              pin_memory=True).to(
-                                                  self.device,
-                                                  non_blocking=True)
-        prev_common_req_indices_tensor = torch.tensor(
-            prev_common_req_indices,
-            dtype=torch.int64,
-            pin_memory=True).to(self.device, non_blocking=True)
-        # print('self.input_batch.prev_sampled_token_ids', self.input_batch.prev_sampled_token_ids)
+
+        self.input_ids_index_tensor.cpu[:num_commmon_tokens] = torch.tensor(
+            flattened_indices, dtype=torch.int64, device="cpu")
+        self.prev_common_req_indices_tensor.cpu[:num_commmon_tokens] = torch.tensor(
+            prev_common_req_indices, dtype=torch.int64, device="cpu")
+        
+        self.input_ids_index_tensor.copy_to_gpu(num_commmon_tokens)
+        self.prev_common_req_indices_tensor.copy_to_gpu(num_commmon_tokens)
+
         self.input_ids.gpu.scatter_(
             dim=0,
-            index=input_ids_index_tensor,
+            index=self.input_ids_index_tensor.gpu[:num_commmon_tokens],
             src=self.input_batch.prev_sampled_token_ids[
-            prev_common_req_indices_tensor])
+            self.prev_common_req_indices_tensor.gpu[:num_commmon_tokens]])
         #         prev_common_req_indices_tensor, 0])
 
-        # self.positions.gpu[:num_commmon_tokens].copy_()
 
 
     def prepare_prefill(self, scheduled_batchs: ScheduledBatchs):
@@ -549,7 +529,7 @@ class ModelRunner:
         self.total_blocks = 0
 
         context_lens = [seq.num_tokens for seq in scheduled_batchs.seqs]
-        # positions = np.array(context_lens, dtype=np.int64)
+        positions = np.array(context_lens, dtype=np.int64)
         context_lens = np.array(context_lens, dtype=np.int32)
         input_ids = [seq.last_token for seq in scheduled_batchs.seqs]
         input_ids = np.array(input_ids, dtype=np.int64)
@@ -585,7 +565,7 @@ class ModelRunner:
         var = self.decode_vars
         var["slot_mapping"].np[:graph_bs] = slot_mapping
         var["input_ids"].np[:bs] = prev_input_ids_[:bs].cpu()
-        var["positions"].np[:bs] = prev_positions_[:bs]
+        var["positions"].np[:bs] = positions
         # var["input_ids"].np[:bs] = input_ids
         # var["positions"].np[:bs] = positions
 
@@ -631,7 +611,7 @@ class ModelRunner:
             kv_indices=var["kv_indices"].gpu,
             kv_last_page_lens=var["kv_last_page_lens"].gpu[:bs],
         )
-        return prev_input_ids_, prev_positions_
+        return prev_input_ids_, positions
         return var["input_ids"].gpu[:bs], var["positions"].gpu[:bs]
 
     def _update_paged_kv_tensors(self, block_table: list[int], seq_len: int):
@@ -724,7 +704,6 @@ class ModelRunner:
 
                 self.input_batch.prev_sampled_token_ids = \
                     sampled_token_ids
-                # print("self.input_batch.prev_sampled_token_ids in postprocess", self.input_batch.prev_sampled_token_ids)
                 self.input_batch.prev_req_id_to_index = {
                     req_id: i
                     for i, req_id in enumerate(self.input_batch.req_ids)
@@ -766,7 +745,6 @@ class ModelRunner:
         request_id = self.input_batch.req_ids
         for id in request_id:
             self.input_batch.finished_req_ids.add(id)
-        # print("finish_req:", self.input_batch.finished_req_ids)
 
 
     @torch.inference_mode()
