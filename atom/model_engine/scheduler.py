@@ -166,7 +166,8 @@ class Scheduler:
             self.running.append(seq)
             scheduled_seqs.append(seq)
             # in vllm, using num_new_tokens
-            num_scheduled_tokens[seq.id] = seq.num_tokens
+            num_new_tokens = 1
+            num_scheduled_tokens[seq.id] = num_new_tokens
 
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
 
@@ -190,7 +191,8 @@ class Scheduler:
                 num_seqs += 1
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
-            num_scheduled_tokens[seq.id] = seq.num_tokens
+            num_new_tokens = 1
+            num_scheduled_tokens[seq.id] = num_new_tokens
         
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
 

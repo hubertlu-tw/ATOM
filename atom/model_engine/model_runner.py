@@ -138,6 +138,12 @@ class ModelRunner:
         self.positions = self._make_buffer(self.config.max_num_batched_tokens,
                                            dtype=torch.int64)
 
+        self.arange_np = np.arange(max(self.config.max_num_seqs + 1,
+                                       self.config.max_model_len,
+                                       self.config.max_num_batched_tokens),
+                                   dtype=np.int64)
+
+
         self.input_ids_index_tensor = CpuGpuBuffer(self.config.max_num_seqs, dtype=torch.int64, device=self.device)
         self.prev_common_req_indices_tensor = CpuGpuBuffer(self.config.max_num_seqs, dtype=torch.int64, device=self.device)
 
@@ -226,7 +232,7 @@ class ModelRunner:
         num_scheduled_tokens: dict[str, int] = {}
 
         for seq in seqs:
-            num_scheduled_tokens[seq.id] = seq.num_tokens
+            num_scheduled_tokens[seq.id] = 1
 
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         # print("total_num_scheduled_tokens dummy_batch", total_num_scheduled_tokens)
@@ -438,8 +444,7 @@ class ModelRunner:
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
             self.input_ids.gpu[:num_commmon_tokens].copy_(
-                self.input_batch.prev_sampled_token_ids[:num_commmon_tokens,
-                                                        0],
+                self.input_batch.prev_sampled_token_ids[:num_commmon_tokens],
                 non_blocking=True)
             return
         # Upload the index tensors asynchronously
@@ -640,6 +645,26 @@ class ModelRunner:
         ).cuda(non_blocking=True)
         return temperatures
 
+    def _get_cumsum_and_arange(
+        self,
+        num_tokens: np.ndarray,
+        cumsum_dtype: Optional[np.dtype] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the cumulative sum and batched arange of the given array.
+        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_tokens])
+        """
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
+        total_num_tokens = cu_num_tokens[-1]
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+
+        return cu_num_tokens, arange
+
 
     def prepare_model(self, scheduled_batchs: ScheduledBatchs):
         self._update_states(scheduled_batchs)
@@ -654,9 +679,9 @@ class ModelRunner:
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # cu_num_tokens, arange = self._get_cumsum_and_arange(
-        #     num_scheduled_tokens)
-        cu_num_tokens = np.concatenate([np.arange(n) for n in num_scheduled_tokens])
+        cu_num_tokens, arange = self._get_cumsum_and_arange(
+            num_scheduled_tokens)
+        # cu_num_tokens = np.concatenate([np.arange(n) for n in num_scheduled_tokens])
 
         self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
         seqs = scheduled_batchs.seqs
@@ -669,7 +694,7 @@ class ModelRunner:
     def run_model(
         self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool
     ):
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         ctx = get_context()
         bs = ctx.batch_size
         if is_prefill or self.enforce_eager or bs > self.graph_bs[-1]:
@@ -696,11 +721,13 @@ class ModelRunner:
                 # Cache the sampled tokens on the GPU and avoid CPU sync.
                 # These will be copied into input_ids in the next step
                 # when preparing inputs.
+                invalid_req_indices_set = [None]
                 self.input_batch.prev_sampled_token_ids = \
                     sampled_token_ids
                 self.input_batch.prev_req_id_to_index = {
                     req_id: i
                     for i, req_id in enumerate(self.input_batch.req_ids)
+                    if req_id not in invalid_req_indices_set
                 }
                 # plus 1 to fit next iter seq len
                 # context_lens = [seq.num_tokens + 1 for seq in batch.seqs]
