@@ -137,12 +137,11 @@ class EngineCore:
                 break
 
     def _process_engine_step(self):
-        scheduled_batchs = self.scheduler.schedule()
-        out = self.runner_mgr.call_func("forward", scheduled_batchs, wait_out=True)
-        self.scheduler.postprocess(scheduled_batchs.seqs, out)
-        self.output_queue.put_nowait(
-            [seq for seq in scheduled_batchs.seqs if seq.is_finished]
-        )
+        scheduled_batch = self.scheduler.schedule()
+        out = self.runner_mgr.call_func("forward", scheduled_batch, wait_out=True)
+        seqs = scheduled_batch.seqs.values()
+        self.scheduler.postprocess(seqs, out)
+        self.output_queue.put_nowait([seq for seq in seqs if seq.is_finished])
 
     def pull_and_process_input_queue(self):
         recv_reqs = []

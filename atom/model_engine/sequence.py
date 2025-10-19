@@ -12,6 +12,12 @@ class SequenceStatus(Enum):
     EXIT_ENGINE = auto()
 
 
+class SequenceType(Enum):
+    DUMMY = auto()
+    PREFILL = auto()
+    DECODE = auto()
+
+
 def get_exit_sequence():
     exit_seq = Sequence([-1], 1)
     exit_seq.status = SequenceStatus.EXIT_ENGINE
@@ -27,6 +33,7 @@ class Sequence:
         self.block_size = block_size
         self.id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
+        self.type = SequenceType.DUMMY
         self.token_ids = copy(token_ids)
         self.last_token = token_ids[-1]
         self.num_tokens = len(self.token_ids)
@@ -52,6 +59,7 @@ class Sequence:
 
     @property
     def num_tokens(self):
+        '''The total number of tokens in the sequence. i.e. prompt + completion'''
         return self._num_tokens
 
     @num_tokens.setter

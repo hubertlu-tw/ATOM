@@ -1,118 +1,45 @@
+import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional, cast, Any
+from typing import Any, Optional, cast
+
+import numpy as np
+import torch
 
 from atom.config import Config
 from atom.model_engine.block_manager import BlockManager
-from atom.model_engine.sequence import Sequence, SequenceStatus
+from atom.model_engine.sequence import Sequence, SequenceStatus, SequenceType
 
-import torch
-import numpy as np
-
-@dataclass
-class ScheduledBatchs:
-    seqs: list[Sequence]
-    is_prefill: bool
-    deferred_reqID: list[int]
-
-    unfinished_prev_req: list[Sequence]
-
-    # req_id -> num_scheduled_tokens
-    # Number of tokens scheduled for each request.
-    num_scheduled_tokens: dict[str, int]
-    # Total number of tokens scheduled for all requests.
-    # Equal to sum(num_scheduled_tokens.values())
-    total_num_scheduled_tokens: int
+logger = logging.getLogger("atom")
 
 
-class PrevScheduledBatchs:
-
+class ScheduledBatch:
     def __init__(
         self,
-        max_num_reqs: int,
-        max_model_len: int
+        seqs: dict[int, Sequence],
+        num_scheduled_tokens: np.ndarray,
+        total_tokens_num: int,
+        total_tokens_num_prefill: int = 0,
+        total_tokens_num_decode: int = 0,
+        total_seqs_num: int = 0,
+        total_seqs_num_prefill: int = 0,
+        total_seqs_num_decode: int = 0,
     ):
-        self.max_num_reqs = max_num_reqs
-        self.max_model_len = max_model_len
-        self.token_ids_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_model_len),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=False,
-        )
-        self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.req_id_to_index: dict[str, int] = {}
+        # len(seqs) == total_seqs_num == total_seqs_num_prefill + total_seqs_num_decode
+        self.seqs = seqs
 
-        # Cached reference to the GPU tensor of previously sampled tokens
-        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
-        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
-        self.prev_req_id_to_index: Optional[dict[str, int]] = None
-        self.prev_position_ids: Optional[torch.Tensor] = None
+        # num_scheduled_tokens for each sequence in the batch
+        self.num_scheduled_tokens = num_scheduled_tokens
 
-        self._req_ids: list[Optional[str]] = []
-        self.req_output_token_ids: list[Optional[list[int]]] = []
+        # Total number of tokens scheduled for all requests.
+        self.total_tokens_num = total_tokens_num
+        self.total_tokens_num_prefill = total_tokens_num_prefill
+        self.total_tokens_num_decode = total_tokens_num_decode
 
-        self.finished_req_ids: set[str] = set()
-
-    @property
-    def num_reqs(self) -> int:
-        return len(self.req_id_to_index)
-
-    def _register_add_request(self, request: "Sequence") -> int:
-        """Track add-request operations for logits processors.
-        Not applicable to pooling models.
-        """
-
-        new_req_index = self.num_reqs
-
-        assert new_req_index < self.max_num_reqs
-        return new_req_index
-
-
-    def add_request(
-        self,
-        request: "Sequence",
-    ) -> int:
-        req_index = self._register_add_request(request)
-
-        req_id = request.id
-
-        if req_index == len(self._req_ids):
-            self._req_ids.append(req_id)
-            # self.req_output_token_ids.append(request.output_token_ids)
-        else:
-            self._req_ids[req_index] = req_id
-            # self.req_output_token_ids[req_index] = request.output_token_ids
-        self.req_id_to_index[req_id] = req_index
-
-        # new_req_index = request.last_token
-        # self.req_id_to_index[req_id] = new_req_index
-
-        # self._req_ids.append(req_id)
-
-    def remove_request(self, req_id: str) -> Optional[int]:
-        """This method must always be followed by a call to condense().
-
-        Args:
-          req_id: request to remove
-
-        Returns:
-          Removed request index, or `None` if `req_id` not recognized
-        """
-        req_index = self.req_id_to_index.pop(req_id, None)
-        if req_index is None:
-            return None
-
-        self._req_ids[req_index] = None
-        # self.req_output_token_ids[req_index] = None
-
-
-    @property
-    def req_ids(self) -> list[str]:
-        # None elements should only be present transiently
-        # while performing state updates to the batch.
-        return cast(list[str], self._req_ids)
+        # Total number of reqs scheduled for all requests.
+        self.total_seqs_num = total_seqs_num
+        self.total_seqs_num_prefill = total_seqs_num_prefill
+        self.total_seqs_num_decode = total_seqs_num_decode
 
 
 class Scheduler:
@@ -125,7 +52,6 @@ class Scheduler:
         self.block_manager = BlockManager(config)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
-        self.deferred_reqID = []
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -136,45 +62,55 @@ class Scheduler:
     def extend(self, seqs: list[Sequence]):
         self.waiting.extend(seqs)
 
-    def schedule(self) -> ScheduledBatchs:
+    def schedule(self) -> ScheduledBatch:
         # prefill
-        scheduled_seqs = []
-        num_seqs = 0
+        scheduled_seqs = {}
+        num_seqs_prefill = 0
         num_batched_tokens = 0
 
-        num_scheduled_tokens: dict[str, int] = {}
+        num_scheduled_tokens: list[int] = []
 
         if not self.running and not self.waiting:
             self.block_manager.reset()
 
-        while self.waiting and num_seqs < self.max_num_seqs:
+        while self.waiting and num_seqs_prefill < self.max_num_seqs:
             seq = self.waiting[0]
-            if num_batched_tokens + len(
-                seq
-            ) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
+            num_new_tokens = seq.num_tokens - seq.num_cached_tokens
+            if (
+                num_batched_tokens + num_new_tokens > self.max_num_batched_tokens
+                or not self.block_manager.can_allocate(seq)
+            ):
                 break
-            num_seqs += 1
+            num_seqs_prefill += 1
             self.block_manager.allocate(seq)
-            num_batched_tokens += len(seq) - seq.num_cached_tokens
+            num_batched_tokens += num_new_tokens
             seq.status = SequenceStatus.RUNNING
+            seq.type = SequenceType.PREFILL
             self.waiting.popleft()
             self.running.append(seq)
-            scheduled_seqs.append(seq)
-            # in vllm, using num_new_tokens
-            num_new_tokens = 1
-            num_scheduled_tokens[seq.id] = num_new_tokens
+            scheduled_seqs[seq.id] = seq
+            num_scheduled_tokens.append(num_new_tokens)
 
-        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+        num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+        total_tokens_num_prefill = num_scheduled_tokens_np.sum()
 
-        if scheduled_seqs:
-            return ScheduledBatchs(
-                seqs=scheduled_seqs, is_prefill=True, deferred_reqID=[], unfinished_prev_req=scheduled_seqs,
-                num_scheduled_tokens=num_scheduled_tokens,
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
+        if num_seqs_prefill > 0:
+            logger.info(
+                f"scheduled prefill batch: {num_seqs_prefill} reqs, {total_tokens_num_prefill} tokens"
+            )
+            # lip: TODO for prefill/decode mixed batch
+            return ScheduledBatch(
+                seqs=scheduled_seqs,
+                num_scheduled_tokens=num_scheduled_tokens_np,
+                total_tokens_num=total_tokens_num_prefill,
+                total_tokens_num_prefill=total_tokens_num_prefill,
+                total_seqs_num=num_seqs_prefill,
+                total_seqs_num_prefill=num_seqs_prefill,
             )
 
         # decode
-        while self.running and num_seqs < self.max_num_seqs:
+        num_seqs_decode = 0
+        while self.running and num_seqs_decode < self.max_num_seqs:
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
                 if self.running:
@@ -183,23 +119,29 @@ class Scheduler:
                     self.preempt(seq)
                     break
             else:
-                num_seqs += 1
+                num_seqs_decode += 1
                 self.block_manager.may_append(seq)
-                scheduled_seqs.append(seq)
-            num_new_tokens = 1
-            num_scheduled_tokens[seq.id] = num_new_tokens
-        
-        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+                scheduled_seqs[seq.id] = seq
+                seq.type = SequenceType.DECODE
+                num_new_tokens = 1
+                num_scheduled_tokens.append(num_new_tokens)
+
+        num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+        total_tokens_num_decode = num_scheduled_tokens_np.sum()
 
         assert scheduled_seqs
-        self.running.extendleft(reversed(scheduled_seqs))
-        return ScheduledBatchs(
+        self.running.extendleft(reversed(scheduled_seqs.values()))
+        # logger.info(
+        #     f"Scheduled decode batch: {num_seqs_decode} reqs, {total_tokens_num_decode} tokens"
+        # )
+        return ScheduledBatch(
             seqs=scheduled_seqs,
-            is_prefill=False,
-            deferred_reqID=self.deferred_reqID,
-            unfinished_prev_req=scheduled_seqs,
-            num_scheduled_tokens=num_scheduled_tokens,
-            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            num_scheduled_tokens=num_scheduled_tokens_np,
+            total_tokens_num=total_tokens_num_decode,
+            total_tokens_num_decode=total_tokens_num_decode,
+            total_seqs_num=num_seqs_prefill + num_seqs_decode,
+            total_seqs_num_prefill=num_seqs_prefill,
+            total_seqs_num_decode=num_seqs_decode,
         )
 
     def preempt(self, seq: Sequence):
@@ -207,40 +149,40 @@ class Scheduler:
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[Sequence], prev_token_ids: list[int]):
-
-        # # placeholder for the each decode step
-        token_ids = [self.eos_token_id] * len(seqs)
-        for seq, token_id in zip(seqs, token_ids):
-            seq.append_token(token_id)
-
-        if not prev_token_ids:
-            return
-
+    def postprocess(self, seqs: list[Sequence], prev_token_ids: dict[int, int]):
+        is_deferred_out = True
         # update token_ids with the actual sampled token ids
-        self.unfinished_req = []
-        token_ids = prev_token_ids
-        for i, (seq, token_id) in enumerate(zip(seqs, token_ids)):
-            # seq.append_token(token_id)
-            seq.token_ids[-2] = token_id
+        finished_seqs = []
+        for seq in self.running:
+            if seq.id not in prev_token_ids:
+                continue
+            token_id = prev_token_ids[seq.id]
+            if is_deferred_out:
+                seq.token_ids[-1] = token_id
+            else:
+                seq.append_token(token_id)
+
             leave_reason = None
-            
             # Check if sequence ends with any stop sequence
-            stop_matched = False
             for stop_seq in seq.stop_token_sequences:
                 if len(seq.token_ids) >= len(stop_seq):
-                    if seq.token_ids[-len(stop_seq):] == stop_seq:
-                        stop_matched = True
+                    if seq.token_ids[-len(stop_seq) :] == stop_seq:
+                        leave_reason = "stop_sequence"
                         break
-            
-            if (not seq.ignore_eos and token_id == self.eos_token_id) or stop_matched:
-                leave_reason = "eos"
-            elif seq.num_completion_tokens == seq.max_tokens:
-                leave_reason = "max_tokens"
+            else:
+                if not seq.ignore_eos and token_id == self.eos_token_id:
+                    leave_reason = "eos"
+                elif seq.num_completion_tokens == seq.max_tokens:
+                    leave_reason = "max_tokens"
             if leave_reason is not None:
                 seq.leave_reason = leave_reason
                 seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
-                self.running.remove(seq)
-            else:
-                self.unfinished_req.append(i)
+                finished_seqs.append(seq)
+        if is_deferred_out:
+            # placeholder for the each decode step
+            for seq in seqs:
+                if seq.status == SequenceStatus.RUNNING:
+                    seq.append_token(self.eos_token_id)
+        for seq in finished_seqs:
+            self.block_manager.deallocate(seq)
+            self.running.remove(seq)

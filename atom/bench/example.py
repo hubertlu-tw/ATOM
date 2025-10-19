@@ -40,33 +40,45 @@ parser.add_argument("--port", type=int, default=8006, help="API server port")
 
 
 parser.add_argument(
-    "--cudagraph-capture-sizes", type=str, default="[1,2,4,8,16]", help="Sizes to capture cudagraph."
+    "--cudagraph-capture-sizes",
+    type=str,
+    default="[1,2,4,8,16]",
+    help="Sizes to capture cudagraph.",
 )
 
 parser.add_argument("--level", type=int, default=3, help="The level of compilation")
 
 parser.add_argument(
-    "--torch-profiler-dir", type=str, default=None, help="Directory to save torch profiler traces"
+    "--torch-profiler-dir",
+    type=str,
+    default=None,
+    help="Directory to save torch profiler traces",
 )
 
 parser.add_argument(
-    "--enable-expert-parallel", action="store_true", help="Enable expert parallel(EP MoE)."
+    "--enable-expert-parallel",
+    action="store_true",
+    help="Enable expert parallel(EP MoE).",
 )
 
+parser.add_argument("--block-size", type=int, default=16, help="KV cache block size.")
 parser.add_argument(
-    "--block-size", type=int, default=16, help="KV cache block size."
+    "--temperature", type=float, default=0.6, help="temperature for sampling"
 )
 
 parser.add_argument(
     "--load_dummy", action="store_true", help="Skip loading model weights."
 )
 
+
 def parse_size_list(size_str: str) -> List[int]:
     import ast
+
     try:
         return ast.literal_eval(size_str)
     except (ValueError, SyntaxError) as e:
         raise ValueError(f"Error list size: {size_str}") from e
+
 
 def main():
     args = parser.parse_args()
@@ -84,12 +96,12 @@ def main():
         enable_expert_parallel=args.enable_expert_parallel,
         torch_profiler_dir=args.torch_profiler_dir,
         compilation_config=CompilationConfig(
-            level = args.level,
-            cudagraph_capture_sizes=parse_size_list(args.cudagraph_capture_sizes)
-    )
+            level=args.level,
+            cudagraph_capture_sizes=parse_size_list(args.cudagraph_capture_sizes),
+        ),
     )
 
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
+    sampling_params = SamplingParams(temperature=args.temperature, max_tokens=256)
     prompts = [
         "introduce yourself",
         "list all prime numbers within 100",
@@ -122,6 +134,7 @@ def main():
     # _ = llm.generate(warmup_prompts, sampling_params)
 
     # generate (with profiling)
+    # outputs_ = llm.generate(["Benchmark: "], SamplingParams())
     outputs = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):
