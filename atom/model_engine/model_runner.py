@@ -485,6 +485,8 @@ class ModelRunner:
                 )
                 set_forward_context(module.layer_num, attention_metadata)
                 layer_id += 1
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         return True
 
     def prepare_block_tables(self, seqs: list[Sequence]):
