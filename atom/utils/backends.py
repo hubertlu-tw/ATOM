@@ -247,8 +247,7 @@ def split_graph(graph: fx.GraphModule,
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        # print(str(node.target))
-        if node.op == 'call_function' and str(node.target) in ops:
+        if node.op == 'call_function' and (hasattr(node.target, 'spliting_op') and (node.target.spliting_op)):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)

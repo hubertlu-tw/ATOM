@@ -18,8 +18,9 @@ from atom.models.deepseek_v2 import DeepseekV2ForCausalLM
 from atom.models.llama import LlamaForCausalLM
 from atom.models.mixtral import MixtralForCausalLM
 from atom.models.qwen3 import Qwen3ForCausalLM
-from atom.utils import CpuGpuBuffer, init_exit_handler
+from atom.utils import CpuGpuBuffer, init_exit_handler, get_hf_text_config
 from atom.utils.context import get_context, reset_context, set_context
+from atom.utils.selector import get_attn_backend
 
 logger = logging.getLogger("atom")
 from atom.utils.forward_context import AttentionMetadata, set_forward_context
@@ -200,6 +201,13 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.label = f"Model Runner{rank}/{self.world_size}"
+        self.hf_text_config = get_hf_text_config(hf_config)
+        self.use_mla = self.is_deepseek_mla()
+        self.attn_backend = get_attn_backend(
+            self.block_size,
+            use_mla=self.use_mla,
+        )
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(self.block_size)
 
         # Initialize profiler for this rank
         self.profiler = None
@@ -249,6 +257,21 @@ class ModelRunner:
 
         if self.config.compilation_config.level == 1:
             self.model = torch.compile(self.model, fullgraph=True, backend="eager")
+
+    def is_deepseek_mla(self) -> bool:
+        if not hasattr(self.hf_text_config, "model_type"):
+            return False
+        elif self.hf_text_config.model_type in \
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+            return self.hf_text_config.kv_lora_rank is not None
+        elif self.hf_text_config.model_type == 'eagle':
+            # if the model is an EAGLE module, check for the
+            # underlying architecture
+            return self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3') \
+                and self.hf_text_config.kv_lora_rank is not None
+        return False
+
 
     def _make_buffer(
         self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True
@@ -504,59 +527,8 @@ class ModelRunner:
             block_tables[i, : seq.num_blocks] = seq.block_table
 
     def prepare_prefill(self, batch: ScheduledBatch):
-        bs = batch.total_seqs_num_prefill
-        sum_scheduled_tokens = batch.total_tokens_num_prefill
-        var = self.forward_vars
-        positions = []
-        cu_seqlens_k = [0]
-        max_seqlen_q = 0
-        max_seqlen_k = 0
-        slot_mapping = []
-        seqs = list(batch.seqs.values())
-        seqs = seqs[:bs]
-        for seq in seqs:
-            seqlen = seq.num_tokens
-            positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
-            cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
-            max_seqlen_q = max(seqlen_q, max_seqlen_q)
-            max_seqlen_k = max(seqlen_k, max_seqlen_k)
-            if not seq.block_table:
-                continue
-            for i in range(seq.num_cached_blocks, seq.num_blocks):
-                start = seq.block_table[i] * self.block_size
-                if i != seq.num_blocks - 1:
-                    end = start + self.block_size
-                else:
-                    end = start + seq.last_block_num_tokens
-                slot_mapping.extend(list(range(start, end)))
-        if cu_seqlens_k[-1] > batch.total_tokens_num:  # prefix cache
-            self.prepare_block_tables(seqs)
-        var["positions"].np[:sum_scheduled_tokens] = positions
-        var["slot_mapping"].np[: len(slot_mapping)] = slot_mapping
-        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True)
+        return self.attn_metadata_builder.prepare_prefill(batch, self.forward_vars)
 
-        min_seqlen_q = 0
-        dropout_p = 0.0
-        vars_used = [
-            ("block_tables", bs),
-            ("cu_seqlens_q", bs + 1),
-            ("slot_mapping", len(slot_mapping)),
-        ]
-        ctx = {el: var[el].copy_to_gpu(num) for el, num in vars_used}
-        set_context(
-            True,
-            batch_size=bs,
-            cu_seqlens_k=cu_seqlens_k.cuda(non_blocking=True),
-            # slot_mapping=slot_mapping.cuda(non_blocking=True),
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            min_seqlen_q=min_seqlen_q,
-            dropout_p=dropout_p,
-            **ctx,
-        )
-        return var["positions"].copy_to_gpu(sum_scheduled_tokens)
 
     def prepare_decode(self, batch: ScheduledBatch):
         scheduled_bs = batch.total_seqs_num_decode
@@ -569,101 +541,10 @@ class ModelRunner:
             else next(x for x in self.graph_bs if x >= scheduled_bs)
         )
         assert bs >= scheduled_bs, f"current decode {scheduled_bs=} > max graph_bs{bs}"
-        dropout_p = 0.0
-        max_q_len = 1
-        self.total_blocks = 0
 
-        context_lens = [seq.num_tokens for seq in seqs]
-        positions = context_lens
-        slot_mapping = [
-            seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
-            for seq in seqs
-        ]
-        slot_mapping.extend([-1] * (bs - scheduled_bs))
+        return self.attn_metadata_builder.prepare_decode(batch, bs, self.forward_vars)
 
-        if self.use_kv_indptr:
-            assert self.block_size == 1, "AITER MLA requires only block size 1."
-            self.kv_indices: list[int] = []
-            self.kv_indptr: list[int] = [0]
-            self.kv_last_page_lens: list[int] = []
 
-            for seq in seqs:
-                current_seq_len = seq.num_tokens
-                self._update_paged_kv_tensors(seq.block_table, current_seq_len)
-
-        self.prepare_block_tables(seqs)
-
-        sum_scheduled_tokens = batch.total_tokens_num_decode
-        var = self.forward_vars
-        var["slot_mapping"].np[:bs] = slot_mapping
-        var["positions"].np[:sum_scheduled_tokens] = positions
-        var["context_lens"].np[:scheduled_bs] = context_lens
-        vars_used = [
-            ("slot_mapping", bs),  # TODO: MTP support
-            ("context_lens", bs),
-            ("block_tables", bs),
-        ]
-
-        if self.use_kv_indptr and len(self.kv_indptr) > 0:
-            # extend to the maximum number of blocks as returned by the scheduler
-            self.kv_indices.extend([0] * (self.total_blocks - len(self.kv_indices)))
-            var["kv_indices"].np[: self.total_blocks] = np.array(
-                self.kv_indices, dtype=np.int64
-            )
-            var["kv_indptr"].np[: scheduled_bs + 1] = np.array(
-                self.kv_indptr, dtype=np.int64
-            )
-            var["kv_indptr"].np[scheduled_bs + 1 : bs + 1] = var["kv_indptr"].np[
-                scheduled_bs
-            ]
-            var["kv_last_page_lens"].np[:scheduled_bs] = np.array(
-                self.kv_last_page_lens, dtype=np.int64
-            )
-            var["kv_last_page_lens"].np[scheduled_bs:bs] = 0
-            vars_used = [
-                ("slot_mapping", bs),  # TODO: MTP support
-                ("context_lens", bs),
-                ("block_tables", bs),
-                ("cu_seqlens_q", bs + 1),
-                ("kv_indices", sum(context_lens)),
-                ("kv_indptr", bs + 1),
-                ("kv_last_page_lens", bs),
-            ]
-
-        ctx = {el: var[el].copy_to_gpu(num) for el, num in vars_used}
-        set_context(
-            False,
-            batch_size=scheduled_bs,
-            graph_bs=bs,
-            dropout_p=dropout_p,
-            max_q_len=max_q_len,
-            **ctx,
-        )
-        positions = var["positions"].copy_to_gpu(sum_scheduled_tokens)
-        # for el in ctx:
-        #     print(f"{el}: {ctx[el]}")
-        # print(f"positions: {positions}")
-        return positions
-
-    def _update_paged_kv_tensors(self, block_table: list[int], seq_len: int):
-        # Get the number of valid blocks based on sequence length.
-        # If seq_len = 16, block_size = 16,
-        # block_table_bound is 1 with 1 valid block.
-        # If seq_len = 15, block_size = 16,
-        # block_table_bound is 0 + 1 with 1 valid block.
-        self.total_blocks += len(block_table)
-        block_table_bound = (
-            seq_len // self.block_size + 1
-            if seq_len % self.block_size != 0
-            else seq_len // self.block_size
-        )
-        self.kv_indices.extend(block_table[:block_table_bound])
-        self.kv_indptr.append(self.kv_indptr[-1] + block_table_bound)
-
-        last_page_len = seq_len % self.block_size
-        if last_page_len == 0:
-            last_page_len = self.block_size
-        self.kv_last_page_lens.append(last_page_len)
 
     def prepare_sample(self, batch: ScheduledBatch) -> torch.Tensor:
         temperatures = [seq.temperature for seq in batch.seqs.values()]

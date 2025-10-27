@@ -10,17 +10,6 @@ from aiter import QuantType
 from aiter.utility.dtypes import d_dtypes
 from transformers import AutoConfig, PretrainedConfig
 
-CUDA_CAPTURE = True
-
-
-def get_capture_status() -> bool:
-    return CUDA_CAPTURE
-
-
-def set_capture_status(capture):
-    global CUDA_CAPTURE
-    CUDA_CAPTURE = capture
-
 
 class CUDAGraphMode(enum.Enum):
     """Constants for the cudagraph mode in CompilationConfig.
@@ -154,16 +143,6 @@ class CompilationConfig:
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
 
-    _attention_ops: ClassVar[list[str]] = [
-        "aiter.unified_attention_with_output"
-        # "aiter.wrapper_fmha_v3_varlen_fwd",
-        # "vllm.unified_attention",
-        # "vllm.unified_attention_with_output",
-        # "vllm.mamba_mixer2",
-        # "vllm.mamba_mixer",
-        # "vllm.short_conv",
-        # "vllm.linear_attention",
-    ]
 
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
@@ -217,6 +196,7 @@ class CompilationConfig:
         factors.append(self.local_cache_dir)
         factors.append(self.cudagraph_capture_sizes)
         factors.append(self.cuda_graph_sizes)
+
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def set_splitting_ops_for_v1(self):
@@ -228,13 +208,10 @@ class CompilationConfig:
         )
 
         if self.splitting_ops is None:
-            # NOTE: When using full cudagraph, instead of setting an empty
-            # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture the
-            # full cudagraph outside the fx graph. This reduces some cpu
-            # overhead when the runtime batch_size is not cudagraph captured.
-            # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            self.splitting_ops = self._attention_ops
+            self.splitting_ops = [
+                "aiter.unified_attention_with_output",
+                "aiter.mla_attention",
+            ]
 
 
 class QuantizationConfig(dict):
@@ -420,6 +397,7 @@ class Config:
             vllm_factors.append(self.compilation_config.compute_hash())
 
         factors.append(vllm_factors)
+        factors.append(self.tensor_parallel_size)
 
         hash_str = hashlib.md5(
             str(factors).encode(), usedforsecurity=False

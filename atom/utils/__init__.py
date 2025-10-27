@@ -13,14 +13,52 @@ from multiprocessing.process import BaseProcess
 from typing import Any, Iterator, Optional, Sequence, Union
 from urllib.parse import urlparse
 from uuid import uuid4
+from transformers import PretrainedConfig
 
 import numpy as np
 import psutil
 import torch
 import zmq
 import zmq.asyncio
+from atom.utils.custom_register import direct_register_custom_op
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("atom")
+
+def mark_spliting_op(
+    is_custom: bool,
+    gen_fake: Optional[Callable[..., Any]] = None,
+    mutates_args: list[str] = [],
+):
+    def decorator(func):
+        if not is_custom:
+            func.spliting_op = True
+            return func
+
+        direct_register_custom_op(
+            op_name=func.__name__,
+            op_func=func,
+            mutates_args=mutates_args,
+            fake_impl=gen_fake,
+        )
+        registered_op = getattr(torch.ops.aiter, func.__name__)
+        registered_op.spliting_op = True
+        return func
+
+    return decorator
+
+def get_hf_text_config(config: PretrainedConfig):
+    """Get the "sub" config relevant to llm for multi modal models.
+    No op for pure text models.
+    """
+    if hasattr(config, "text_config"):
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
+        assert hasattr(config.text_config, "num_attention_heads")
+        return config.text_config
+    else:
+        return config
 
 
 def get_mp_context() -> Union[ForkContext, SpawnContext]:

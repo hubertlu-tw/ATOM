@@ -16,10 +16,21 @@ from atom.utils.forward_context import (
     get_forward_context,
     set_forward_context,
 )
+from atom.utils import mark_spliting_op
 
+def fake_(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    scale: float, kv_cache_dtype: str, layer_num: int
+)-> torch.Tensor:
+    output_shape = q.shape
+    output = torch.zeros(output_shape,
+                            dtype=q.dtype,
+                            device=q.device)
+    return output
 
 # Dynamo will not try to inspect any of the internal operations for prefill or decode
 # @torch.library.custom_op("aiter::unified_attention_with_output", mutates_args=["q", "k", "v", "k_cache", "v_cache", "k_scale", "v_scale"])
+@mark_spliting_op(is_custom=True, gen_fake=fake_)
 def unified_attention_with_output(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     scale: float, kv_cache_dtype: str, layer_num: int
@@ -96,24 +107,12 @@ def unified_attention_with_output(
 
     return o
 
-# @unified_attention_with_output.register_fake
-def _(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    scale: float, kv_cache_dtype: str, layer_num: int
-)-> torch.Tensor:
-    output_shape = q.shape
-    output = torch.zeros(output_shape,
-                            dtype=q.dtype,
-                            device=q.device)
-    return output
-
-
-direct_register_custom_op(
-    op_name="unified_attention_with_output",
-    op_func=unified_attention_with_output,
-    mutates_args=[],
-    fake_impl=_,
-)
+# direct_register_custom_op(
+#     op_name="unified_attention_with_output",
+#     op_func=unified_attention_with_output,
+#     mutates_args=[],
+#     fake_impl=_,
+# )
 
 
 class Attention(nn.Module):

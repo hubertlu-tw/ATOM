@@ -285,9 +285,6 @@ def _support_torch_compile(
                               patched_inline_call):
                 # print("self.compiled_callable to call torch compile")
                 output = self.compiled_callable(*args, **kwargs)
-                from aiter import logger
-                logger.info("torch.compiler.is_compiling()")
-                logger.info(torch.compiler.is_compiling())
             return output
 
         # usually, capturing the model once is enough, and then we can

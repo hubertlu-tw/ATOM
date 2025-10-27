@@ -26,6 +26,7 @@ from tqdm import tqdm
 import logging
 
 from aiter.dist.parallel_state import get_tp_group
+from atom.utils import mark_spliting_op
 
 
 logger = logging.getLogger("atom")
@@ -353,7 +354,51 @@ def _forward_linear_fp8_no_bias(x: torch.Tensor, weight: torch.Tensor, weight_sc
         y = get_tp_group().all_reduce(y, ca_fp8_quant=False)
     return y
 
+def fake_mla_attention(
+    q: torch.Tensor,  # query in unified attn
+    k_c_normed: torch.Tensor,  # key in unified attn
+    k_pe: torch.Tensor,  # value in unified attn
+    positions: torch.Tensor,
+    W_K: torch.Tensor,
+    W_V: torch.Tensor,
+    W_K_scale: torch.Tensor,
+    W_V_scale: torch.Tensor,
+    rotary_emb_cos_cache: torch.Tensor,
+    rotary_emb_sin_cache: torch.Tensor,
+    rotary_emb_is_neox_style: bool,
+    rotary_emb_head_size: int,
+    rotary_emb_rotary_dim: int,
+    q_proj_weight_data: torch.Tensor,
+    q_proj_weight_scale_data: torch.Tensor,
+    q_proj_tp_dim: int,
+    q_proj_tp_size: int,
+    q_proj_reduce_results: bool,
+    kv_b_proj_weight_data: torch.Tensor,
+    kv_b_proj_weight_scale_data: torch.Tensor,
+    kv_b_proj_tp_dim: int,
+    kv_b_proj_tp_size: int,
+    kv_b_proj_reduce_results: bool,
+    o_proj_weight_data: torch.Tensor,
+    o_proj_weight_scale_data: torch.Tensor,
+    o_proj_tp_dim: int,
+    o_proj_tp_size: int,
+    o_proj_reduce_results: bool,
+    kv_lora_rank: int,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    qk_head_dim: int,
+    v_head_dim: int,
+    kv_cache_dtype: str,
+    scale: float,
+    layer_num: int
+) -> torch.Tensor:
+    output_shape = list(q.shape)
+    output_shape[-1] = 7168  # TODO: read from hidden_size
+    return torch.zeros(output_shape, dtype=q.dtype, device=q.device)
 
+
+@mark_spliting_op(is_custom=True, gen_fake=fake_mla_attention)
 def mla_attention(
     q: torch.Tensor,  # query in unified attn
     k_c_normed: torch.Tensor,  # key in unified attn
@@ -447,56 +492,12 @@ def mla_attention(
     return output
 
 
-def fake_mla_attention(
-    q: torch.Tensor,  # query in unified attn
-    k_c_normed: torch.Tensor,  # key in unified attn
-    k_pe: torch.Tensor,  # value in unified attn
-    positions: torch.Tensor,
-    W_K: torch.Tensor,
-    W_V: torch.Tensor,
-    W_K_scale: torch.Tensor,
-    W_V_scale: torch.Tensor,
-    rotary_emb_cos_cache: torch.Tensor,
-    rotary_emb_sin_cache: torch.Tensor,
-    rotary_emb_is_neox_style: bool,
-    rotary_emb_head_size: int,
-    rotary_emb_rotary_dim: int,
-    q_proj_weight_data: torch.Tensor,
-    q_proj_weight_scale_data: torch.Tensor,
-    q_proj_tp_dim: int,
-    q_proj_tp_size: int,
-    q_proj_reduce_results: bool,
-    kv_b_proj_weight_data: torch.Tensor,
-    kv_b_proj_weight_scale_data: torch.Tensor,
-    kv_b_proj_tp_dim: int,
-    kv_b_proj_tp_size: int,
-    kv_b_proj_reduce_results: bool,
-    o_proj_weight_data: torch.Tensor,
-    o_proj_weight_scale_data: torch.Tensor,
-    o_proj_tp_dim: int,
-    o_proj_tp_size: int,
-    o_proj_reduce_results: bool,
-    kv_lora_rank: int,
-    num_heads: int,
-    qk_nope_head_dim: int,
-    qk_rope_head_dim: int,
-    qk_head_dim: int,
-    v_head_dim: int,
-    kv_cache_dtype: str,
-    scale: float,
-    layer_num: int
-) -> torch.Tensor:
-    output_shape = list(q.shape)
-    output_shape[-1] = 7168  # TODO: read from hidden_size
-    return torch.zeros(output_shape, dtype=q.dtype, device=q.device)
-
-
-direct_register_custom_op(
-    op_name="mla_attention",
-    op_func=mla_attention,
-    mutates_args=[],
-    fake_impl=fake_mla_attention,
-)
+# direct_register_custom_op(
+#     op_name="mla_attention",
+#     op_func=mla_attention,
+#     mutates_args=[],
+#     fake_impl=fake_mla_attention,
+# )
 
 
 class MLAAttention(nn.Module):
@@ -618,9 +619,9 @@ class MLAAttention(nn.Module):
     ) -> torch.Tensor:
         return torch.ops.aiter.mla_attention(q, k_c_normed, k_pe, positions, self.W_K, self.W_V, self.W_K_scale, self.W_V_scale,
                                              self.rotary_emb.cos_cache, self.rotary_emb.sin_cache, self.rotary_emb.is_neox_style, self.rotary_emb.head_size, self.rotary_emb.rotary_dim,
-                                             self.q_proj.weight.data, self.q_proj.weight_scale.data, self.q_proj.tp_dim, self.q_proj.tp_size, self.q_proj.reduce_results,
-                                             self.kv_b_proj.weight.data, self.kv_b_proj.weight_scale.data, self.kv_b_proj.tp_dim, self.kv_b_proj.tp_size, self.kv_b_proj.reduce_results,
-                                             self.o_proj.weight.data, self.o_proj.weight_scale.data, self.o_proj.tp_dim, self.o_proj.tp_size, self.o_proj.reduce_results,
+                                             self.q_proj.weight, self.q_proj.weight_scale, self.q_proj.tp_dim, self.q_proj.tp_size, self.q_proj.reduce_results,
+                                             self.kv_b_proj.weight, self.kv_b_proj.weight_scale, self.kv_b_proj.tp_dim, self.kv_b_proj.tp_size, self.kv_b_proj.reduce_results,
+                                             self.o_proj.weight, self.o_proj.weight_scale, self.o_proj.tp_dim, self.o_proj.tp_size, self.o_proj.reduce_results,
                                              self.kv_lora_rank, self.num_heads,
                                              self.qk_nope_head_dim, self.qk_rope_head_dim, self.qk_head_dim, self.v_head_dim, self.kv_cache_dtype,
                                              self.scale, self.layer_num)
