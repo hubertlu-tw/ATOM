@@ -1,5 +1,5 @@
 import torch
-from aiter import mixed_sample
+from aiter import mixed_sample, mixed_sample_outer_exponential
 from aiter.ops.triton.softmax import softmax
 from aiter.ops.triton.topk import topk
 from torch import nn
@@ -19,12 +19,19 @@ class Sampler(nn.Module):
         sampled_tokens = torch.empty(
             logits.size(0), dtype=torch.int, device=logits.device
         )
-        mixed_sample(sampled_tokens, logits, temperatures, lambd=1.0, eps=self.eps)
+        exponential = (
+            torch.empty((1, logits.shape[-1]), dtype=torch.float, device=logits.device)
+            .exponential_(1)
+            .expand(*logits.shape)
+        )
+        mixed_sample_outer_exponential(
+            sampled_tokens, logits, exponential, temperatures, eps=self.eps
+        )
         return sampled_tokens
         logits = logits.float()
         return torch.where(
             temperatures == 0, self.greedy_sample(logits), self.random_sample(logits)
-        )
+        ).to(torch.int)
 
     def greedy_sample(
         self, logits: torch.Tensor  # (token_num, vocab_size)
