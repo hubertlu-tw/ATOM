@@ -8,7 +8,7 @@ from aiter import (
     dtypes,
     gemm_a4w4,
     gemm_a8w8,
-    gemm_a8w8_blockscale,
+    gemm_a8w8_blockscale_bpreshuffle,
     gemm_a8w8_bpreshuffle,
     get_hip_quant,
     get_triton_quant,
@@ -168,7 +168,7 @@ class LinearBase(nn.Module):
             )
         if (
             self.quant_type == QuantType.per_Token and self.params_dtype == dtypes.fp8
-        ) or (self.quant_type == QuantType.per_1x32):
+        ) or (self.quant_type in [QuantType.per_1x32, QuantType.per_1x128]):
             self.weight.data = shuffle_weight(self.weight.data, (16, 16))
 
     def forward(
@@ -179,6 +179,8 @@ class LinearBase(nn.Module):
         else:
             if x_scale is None:
                 quant_func = get_hip_quant(self.quant_type)
+                if self.quant_type.value == QuantType.per_1x128.value:
+                    quant_func = functools_partial(quant_func, transpose_scale=True)
                 x, x_scale = quant_func(
                     x,
                     quant_dtype=self.params_dtype,
@@ -213,7 +215,7 @@ class LinearBase(nn.Module):
                         dtype=otype,
                     )
             elif self.quant_type.value == QuantType.per_1x128.value:
-                y = gemm_a8w8_blockscale(
+                y = gemm_a8w8_blockscale_bpreshuffle(
                     x, self.weight, x_scale, self.weight_scale, dtype=otype
                 )
                 if self.bias is not None:
