@@ -68,7 +68,7 @@ class Attention(nn.Module):
         self.use_mla = use_mla
         self.base_attention = None
         self.kv_cache = torch.tensor([])
-        self.indexer = mla_modules.indexer
+        self.indexer = mla_modules.indexer if mla_modules is not None else None
 
         atom_config = get_current_atom_config()
         block_size = atom_config.kv_cache_block_size

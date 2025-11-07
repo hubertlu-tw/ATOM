@@ -610,20 +610,6 @@ class ModelRunner:
     def prepare_prefill(self, batch: ScheduledBatch):
         return self.attn_metadata_builder.prepare_prefill(batch, self.forward_vars)
 
-    def prepare_decode(self, batch: ScheduledBatch):
-        scheduled_bs = batch.total_seqs_num_decode
-        seqs = list(batch.seqs.values())
-        seqs = seqs[batch.total_seqs_num_prefill :]
-        assert len(seqs) == scheduled_bs
-        bs = (
-            scheduled_bs
-            if self.enforce_eager
-            else next(x for x in self.graph_bs if x >= scheduled_bs)
-        )
-        assert bs >= scheduled_bs, f"current decode {scheduled_bs=} > max graph_bs{bs}"
-
-        return self.attn_metadata_builder.prepare_decode(batch, bs, self.forward_vars)
-
     def prepare_intputs(self, batch: ScheduledBatch):
         is_prefill = batch.total_tokens_num_prefill > 0
         bs = batch.total_seqs_num
@@ -638,7 +624,8 @@ class ModelRunner:
             bs = (
                 scheduled_bs
                 if self.enforce_eager
-                else next(x for x in self.graph_bs if x >= scheduled_bs)
+                else next((x for x in self.graph_bs if x >= scheduled_bs), scheduled_bs)
+                # Use cudagraph and padding to batch_size, if bs > graph_bs, use eager mode
             )
             assert bs >= scheduled_bs, f"current decode {scheduled_bs=} > max graph_bs{bs}"
             self.forward_vars["cu_seqlens_q"].np[scheduled_bs + 1 : bs + 1] = self.forward_vars["cu_seqlens_q"].np[scheduled_bs]

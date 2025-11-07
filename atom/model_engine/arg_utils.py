@@ -102,8 +102,8 @@ class EngineArgs:
         parser.add_argument(
             "--cudagraph-capture-sizes",
             type=str,
-            default="[1,2,4,8,16]",
-            help="Sizes to capture cudagraph.",
+            default=None,
+            help="Sizes to capture cudagraph. Example: [1,2,4,8,16]",
         )
 
         parser.add_argument(
@@ -164,7 +164,7 @@ class EngineArgs:
             torch_profiler_dir=self.torch_profiler_dir,
             compilation_config=CompilationConfig(
                 level=self.level,
-                cudagraph_capture_sizes=parse_size_list(self.cudagraph_capture_sizes),
+                cudagraph_capture_sizes=parse_size_list(self.cudagraph_capture_sizes) if self.cudagraph_capture_sizes else None,
             ),
         )
 
