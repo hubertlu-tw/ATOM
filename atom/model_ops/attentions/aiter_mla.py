@@ -105,6 +105,9 @@ class AiterMLAMetadataBuilder(CommonAttentionBuilder):
             **ctx,
         )
         positions = var["positions"].copy_to_gpu(sum_scheduled_tokens)
+        # if str(positions.device) == "cuda:0":
+        #     for el, var in ctx.items():
+        #         print(f"{el}: {var}")
         return attn_metadata, positions
 
     def build_for_cudagraph_capture(self, forward_vars, bs: int) -> AttentionMetaData:

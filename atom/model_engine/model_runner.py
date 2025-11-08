@@ -22,7 +22,14 @@ from atom.utils import CpuGpuBuffer, init_exit_handler, get_hf_text_config
 from atom.utils.selector import get_attn_backend
 
 logger = logging.getLogger("atom")
-from atom.utils.forward_context import AttentionMetaData, Context, get_forward_context, reset_forward_context, set_forward_context, set_kv_cache_data
+from atom.utils.forward_context import (
+    AttentionMetaData,
+    Context,
+    get_forward_context,
+    reset_forward_context,
+    set_forward_context,
+    set_kv_cache_data,
+)
 
 suppot_model_arch_dict = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
@@ -31,9 +38,9 @@ suppot_model_arch_dict = {
     "DeepseekV3ForCausalLM": DeepseekV2ForCausalLM,
     "DeepseekV32ForCausalLM": DeepseekV2ForCausalLM,
 }
-# seed=1
-# np.random.seed(seed)
-# torch.cuda.manual_seed_all(seed)
+seed = 34567
+np.random.seed(seed)
+torch.cuda.manual_seed_all(seed)
 
 
 class tokenIDProcessor:
@@ -516,7 +523,7 @@ class ModelRunner:
                 device="cuda",
             )
         # Build KVCacheConfig
-        # lirong TODO: This is a simple solution to build KVCacheConfig, 
+        # lirong TODO: This is a simple solution to build KVCacheConfig,
         # models with only one type of attention, but not support multi-type of attention models.
         # We need to support it by kv_cache_group in the future.
         kv_cache_tensors = []
@@ -547,7 +554,7 @@ class ModelRunner:
 
                     k_scale = module.k_scale
                     v_scale = module.v_scale
-                    
+
                     # Store in KVCacheTensor
                     kv_cache_tensor = KVCacheTensor(
                         layer_num=layer_id,
@@ -557,7 +564,7 @@ class ModelRunner:
                         v_scale=v_scale,
                     )
                     kv_cache_tensors.append(kv_cache_tensor)
-                    
+
                     module.k_cache = k_cache
                     module.v_cache = v_cache
 
@@ -588,13 +595,16 @@ class ModelRunner:
                         v_scale=None,
                     )
                     kv_cache_tensors.append(kv_cache_tensor)
-                    
+
                     module.kv_cache = kv_cache
                     module.max_model_len = self.config.max_model_len
                     layer_id += 1
-        
+
         # Store KVCacheConfig
-        kv_cache_data = {f"layer_{i}": kv_cache_tensor for i, kv_cache_tensor in enumerate(kv_cache_tensors)}
+        kv_cache_data = {
+            f"layer_{i}": kv_cache_tensor
+            for i, kv_cache_tensor in enumerate(kv_cache_tensors)
+        }
         # vllm use register_kv_caches to register kv_cache_data. We just set it to global here
         set_kv_cache_data(kv_cache_data)
         if torch.distributed.is_initialized():
@@ -627,13 +637,28 @@ class ModelRunner:
                 else next((x for x in self.graph_bs if x >= scheduled_bs), scheduled_bs)
                 # Use cudagraph and padding to batch_size, if bs > graph_bs, use eager mode
             )
-            assert bs >= scheduled_bs, f"current decode {scheduled_bs=} > max graph_bs{bs}"
-            self.forward_vars["cu_seqlens_q"].np[scheduled_bs + 1 : bs + 1] = self.forward_vars["cu_seqlens_q"].np[scheduled_bs]
-        attn_metadata, positions = self.attn_metadata_builder.build(batch, self.forward_vars, bs)
-        context_bs = batch.total_seqs_num_prefill if is_prefill else batch.total_seqs_num_decode
+            assert (
+                bs >= scheduled_bs
+            ), f"current decode {scheduled_bs=} > max graph_bs{bs}"
+            self.forward_vars["cu_seqlens_q"].np[scheduled_bs + 1 : bs + 1] = (
+                self.forward_vars["cu_seqlens_q"].np[scheduled_bs]
+            )
+        attn_metadata, positions = self.attn_metadata_builder.build(
+            batch, self.forward_vars, bs
+        )
+        context_bs = (
+            batch.total_seqs_num_prefill if is_prefill else batch.total_seqs_num_decode
+        )
 
-        context = Context(positions=positions, is_prefill=is_prefill, batch_size=context_bs, graph_bs=bs)
-        set_forward_context(attn_metadata=attn_metadata, atom_config=self.config, context=context)
+        context = Context(
+            positions=positions,
+            is_prefill=is_prefill,
+            batch_size=context_bs,
+            graph_bs=bs,
+        )
+        set_forward_context(
+            attn_metadata=attn_metadata, atom_config=self.config, context=context
+        )
 
     def prepare_sample(self, batch: ScheduledBatch) -> torch.Tensor:
         temperatures = [seq.temperature for seq in batch.seqs.values()]
@@ -644,10 +669,11 @@ class ModelRunner:
 
     def prepare_model(self, batch: ScheduledBatch):
         total_tokens_num = batch.total_tokens_num
-        assert total_tokens_num > 0   
+        assert total_tokens_num > 0
 
         input_ids = self.tokenID_processor.prepare_input_ids(batch)
-        # print(f"input_ids: {input_ids}")
+        # if self.rank == 0:
+        #     print(f"input_ids: {input_ids}")
 
         self.prepare_intputs(batch)
         temperatures = self.prepare_sample(batch)
@@ -729,8 +755,16 @@ class ModelRunner:
                     capture_range.set_description(f"Capturing {bs=}")
                 graph = torch.cuda.CUDAGraph()
 
-                attn_metadata, context = self.attn_metadata_builder.build_for_cudagraph_capture(forward_vars=self.forward_vars, bs=bs)
-                set_forward_context(attn_metadata=attn_metadata, atom_config=self.config, context=context)
+                attn_metadata, context = (
+                    self.attn_metadata_builder.build_for_cudagraph_capture(
+                        forward_vars=self.forward_vars, bs=bs
+                    )
+                )
+                set_forward_context(
+                    attn_metadata=attn_metadata,
+                    atom_config=self.config,
+                    context=context,
+                )
 
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
 

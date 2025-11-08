@@ -21,21 +21,23 @@ parser.add_argument(
 
 
 def main():
-    args = parser.parse_args()
-    
-    # Create engine from args
-    engine_args = EngineArgs.from_cli_args(args)
-    llm = engine_args.create_engine()
-    
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-
-    sampling_params = SamplingParams(temperature=args.temperature, max_tokens=256)
     prompts = [
         "introduce yourself",
         "list all prime numbers within 100",
         "1+2+3=?",
         "如何在一个月内增肌10公斤",
     ]
+    args = parser.parse_args()
+    args.cudagraph_capture_sizes = str([1, len(prompts)])
+
+    # Create engine from args
+    engine_args = EngineArgs.from_cli_args(args)
+    llm = engine_args.create_engine()
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    sampling_params = SamplingParams(temperature=args.temperature, max_tokens=256)
+
     prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
