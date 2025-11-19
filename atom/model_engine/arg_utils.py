@@ -185,6 +185,8 @@ class EngineArgs:
                 level=self.level,
                 cudagraph_capture_sizes=parse_size_list(self.cudagraph_capture_sizes) if self.cudagraph_capture_sizes else None,
             ),
+            data_parallel_size=self.data_parallel_size,
+            enable_dp_attention=self.enable_dp_attention,
         )
     
     def create_async_engine(self) -> AsyncLLMEngine:

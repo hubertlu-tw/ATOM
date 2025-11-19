@@ -265,7 +265,7 @@ class ModelRunner:
         init_exit_handler(self)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
-        torch.set_default_device("cuda")
+        torch.set_default_device(self.device)
         self.attn_backend = get_attn_backend(
             self.block_size,
             use_mla=self.use_mla,
@@ -289,7 +289,7 @@ class ModelRunner:
         load_model(self.model, config.model, config.hf_config, config.load_dummy)
         if isinstance(self.model, DeepseekV2ForCausalLM):
             self.use_kv_indptr = True
-        torch.set_default_device("cuda")
+        torch.set_default_device(self.device)
         self.allocate_forward_vars()
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(self)
         self.warmup_model()
@@ -502,7 +502,7 @@ class ModelRunner:
         }
 
     def get_num_blocks(self):
-        torch.set_default_device("cuda")
+        torch.set_default_device(self.device)
         config = self.config
         hf_config = config.hf_config
         if not hasattr(hf_config, "head_dim") or hf_config.head_dim is None:
