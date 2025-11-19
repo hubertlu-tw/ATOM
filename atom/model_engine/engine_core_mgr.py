@@ -48,7 +48,6 @@ class CoreManager:
         self.engine_core_identities = []
         self.shutdown_paths = []
         self.output_threads = []
-        self._rr_counter = 0
 
         import torch
         if torch.multiprocessing.get_start_method(allow_none=True) is None:
@@ -271,12 +270,11 @@ class CoreManager:
                 copy=False,
             )
         else:
-            # DP ranks, round-robin with counter for load balancing for atom server
+            # DP ranks, round-robin
             dp_seqs = [[] for _ in range(self.local_engine_count)]
-            for seq in seqs:
-                dp_rank = self._rr_counter % self.local_engine_count
+            for i, seq in enumerate(seqs):
+                dp_rank = i % self.local_engine_count
                 dp_seqs[dp_rank].append(seq)
-                self._rr_counter += 1
 
             for dp_rank, rank_seqs in enumerate(dp_seqs):
                 if rank_seqs:
